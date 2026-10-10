@@ -1,0 +1,64 @@
+# docker-compose.yml — TVHeadend + analog NTSC (ntsc-tvh) on a dedicated Dell OptiPlex 3020
+# ---------------------------------------------------------------------------------------
+# This box has native USB 2.0 ports, so the pvrusb2 "firmware2" upload succeeds and the
+# HVR-1950's hardware MPEG-2 encoder works. No xHCI workarounds are needed here — note
+# there is NO seccomp:unconfined and NO privileged: true (both were dead ends on the old
+# all-USB-3 host; the real blocker there was the xHCI firmware2 upload, fixed by this box).
+#
+# BEFORE the first `docker compose up -d`, on the HOST:
+#   1. Create the dirs:
+#        mkdir -p /home/docker/stacks/tvheadend/{data,recordings,ntsc-state}
+#        chown -R 1000:1000 /home/docker/stacks/tvheadend/ntsc-state   # must match PUID
+#                                          # (the lock + M3U live here; root-owned -> Permission denied)
+#   2. Drop the tool in place (and make it executable):
+#        cp ntsc-tvh /home/docker/stacks/tvheadend/ntsc-tvh && chmod +x ...
+#   3. Firmware present in /lib/firmware/:  v4l-cx2341x-enc.fw  and  v4l-pvrusb2-73xxx-01.fw
+#      Then CONFIRM a clean enumeration — you must NOT see "firmware2 upload transfer failure":
+#        dmesg | grep -i pvrusb2
+#   4. Find the video group GID and fix `group_add` below if it isn't 44:
+#        getent group video
+#   5. Confirm the node is the tuner:
+#        ls -l /dev/video0
+# ---------------------------------------------------------------------------------------
+
+services:
+  tvheadend:
+    image: lscr.io/linuxserver/tvheadend:latest
+    container_name: tvheadend
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Jamaica
+      - RUN_OPTS=                                    # optional
+      # installs the runtime deps ntsc-tvh needs, at container start (idempotent apk add):
+      - DOCKER_MODS=linuxserver/mods:universal-package-install
+      - INSTALL_PACKAGES=python3|v4l-utils|ffmpeg
+    volumes:
+      - /home/docker/stacks/tvheadend/data:/config
+      - /home/docker/stacks/tvheadend/recordings:/recordings
+      # ntsc-tvh: bind-mounted to the EXACT path the generated M3U's pipe:// URLs expect
+      - /home/docker/stacks/tvheadend/ntsc-tvh:/usr/local/bin/ntsc-tvh:ro
+      # persistent scan state + generated playlist + lock (survives container recreation)
+      - /home/docker/stacks/tvheadend/ntsc-state:/var/lib/ntsc-tvh
+      # optional — the script's built-in defaults already match the proven Docker setup
+      #   (CAPTURE_VIA_CAT=1, LOCK_FILE in the state dir, SCAN_LOCK_WAIT=5). Mount this
+      #   only to override something:
+      # - /home/docker/stacks/tvheadend/ntsc-tvh.conf:/etc/ntsc-tvh.conf:ro
+    ports:
+      - 9981:9981
+      - 9982:9982
+    devices:
+      - /dev/video0:/dev/video0                      # analog tuner (V4L2) — the NTSC path
+
+      # --- ATSC on THIS box too? (optional, read first) --------------------------------
+      # The HVR-1950 is a SINGLE tuner. The pvrusb2 driver enforces mutual exclusion
+      # between its analog (V4L2) and digital (DVB) interfaces: they cannot both be open
+      # at once, and simply having TVHeadend's over-the-air EPG grabber active on the DVB
+      # side will lock the analog side out (that was the original "Operation not permitted").
+      # Map /dev/dvb ONLY if you accept analog-OR-ATSC (never both live at the same time),
+      # and turn OFF the OTA EPG grabber in TVHeadend so it doesn't silently claim digital.
+      # Cleanest setup: leave ATSC on its own box and keep this one analog-only.
+      # - /dev/dvb:/dev/dvb
+    group_add:
+      - "44"      # <-- host 'video' GID. VERIFY: getent group video  (fix if not 44)
+    restart: unless-stopped

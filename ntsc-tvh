@@ -1,0 +1,813 @@
+#!/usr/bin/env python3
+# ntsc-tvh - Analog NTSC tuning/streaming/scanning helper for TVHeadend pipe:// muxes
+#
+# Replaces the old ivtv-utils approach with v4l2-ctl + ffmpeg.
+# Designed and tested against the Hauppauge WinTV-HVR-1950 (pvrusb2 driver,
+# on-board hardware MPEG-2 encoder) but auto-detects raw-frame devices too.
+#
+# Subcommands:
+#   doctor                 Check device, driver, codecs, permissions
+#   list                   List channels (all, or --active-only)
+#   tune    CHANNEL        Tune only (debug)
+#   signal  CHANNEL        Tune + report signal strength / AFC (debug)
+#   stream  CHANNEL        Tune + emit an MPEG-TS stream on stdout  <-- TVHeadend calls this
+#   scan                   Scan tuner channels, save the active ones
+#   m3u                    Write an M3U playlist of active channels (for TVHeadend auto-network)
+#   install-timer          Install/remove a systemd timer for periodic rescan (24h or none)
+#   status                 Show last-scan summary
+#
+# Channel IDs:   TABLE:CHANNEL          e.g.  us-bcast:7   us-cable:23   us-cable-irc:5
+#                input:NAME             e.g.  input:composite   input:svideo
+#
+# Config precedence (low -> high): built-in defaults < /etc/ntsc-tvh.conf < environment.
+# Config file is simple KEY=VALUE lines.
+
+import argparse
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+# --------------------------------------------------------------------------- #
+#  Defaults / configuration
+# --------------------------------------------------------------------------- #
+DEFAULTS = {
+    "DEVICE":        "/dev/video0",   # V4L2 capture node of the tuner
+    "STANDARD":      "ntsc",          # analog standard; "ntsc" -> NTSC-M
+    "STATE_FILE":    "/var/lib/ntsc-tvh/state.json",
+    "M3U_FILE":      "/var/lib/ntsc-tvh/ntsc.m3u",
+    "LOCK_FILE":     "/var/lib/ntsc-tvh/ntsc-tvh.lock",  # in the state dir so the runtime user owns it
+                                                          #   (/run/lock is often root-only in containers)
+    "SELF_PATH":     "",              # absolute path written into M3U pipe:// urls; "" = autodetect
+    # streaming -------------------------------------------------------------- #
+    "FFMPEG":        "ffmpeg",
+    "V4L2CTL":       "v4l2-ctl",
+    "AUDIO_CODEC":   "copy",          # copy | mp2 | ac3   (copy keeps the encoder's MP2 audio)
+    "VIDEO_BITRATE": "",              # e.g. 6000000 ; "" = leave driver default (HW encoder)
+    "RAW_VBITRATE":  "6000000",      # software-encode bitrate for raw devices
+    "RAW_AUDIO_DEV": "",              # ALSA capture dev for raw devices; "" = autodetect
+    "CAPTURE_VIA_CAT": "1",           # 1 = `cat DEV | ffmpeg` (HW path). Default ON: on several
+                                      #   ffmpeg builds, letting ffmpeg open the MPEG node directly
+                                      #   yields an empty stream; feeding it via cat is reliable.
+                                      #   Set 0 only if your build reads the node directly just fine.
+    # scanning --------------------------------------------------------------- #
+    "SCAN_TABLES":   "us-bcast,us-cable",   # comma list scanned by default
+    "SCAN_METHOD":   "signal",        # signal | video | both
+    "SCAN_THRESHOLD": "35",           # signal-strength % threshold (signal/both)
+    "SCAN_VAR_MIN":  "12",            # min luma std-dev for the video heuristic
+    "SCAN_DWELL":    "1.2",           # seconds to let the tuner settle before measuring
+    "SCAN_LOCK_WAIT": "5",            # seconds to wait for the tuner lock (0 = abort if busy).
+                                      #   Small wait smooths brief contention (scan vs. live view).
+    "INPUTS_ALWAYS_ACTIVE": "1",      # 1 = composite/svideo always appear in lists/m3u
+}
+
+CONF_PATH = "/etc/ntsc-tvh.conf"
+
+
+def load_config():
+    cfg = dict(DEFAULTS)
+    if os.path.isfile(CONF_PATH):
+        try:
+            with open(CONF_PATH) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    if k in cfg:
+                        cfg[k] = v
+        except OSError as exc:
+            print(f"warning: could not read {CONF_PATH}: {exc}", file=sys.stderr)
+    for k in cfg:
+        if k in os.environ:
+            cfg[k] = os.environ[k]
+    return cfg
+
+
+# --------------------------------------------------------------------------- #
+#  NTSC / CATV frequency plans  (visual / picture carrier, MHz)
+#  Verified against FCC 73.603 (broadcast) and EIA-542 STD/IRC/HRC (cable).
+# --------------------------------------------------------------------------- #
+def bcast_freq(ch):
+    if 2 <= ch <= 4:    return 55.25 + (ch - 2) * 6      # 55.25 / 61.25 / 67.25
+    if 5 <= ch <= 6:    return 77.25 + (ch - 5) * 6      # 77.25 / 83.25
+    if 7 <= ch <= 13:   return 175.25 + (ch - 7) * 6     # 175.25 .. 211.25
+    if 14 <= ch <= 69:  return 471.25 + (ch - 14) * 6    # 471.25 .. 801.25
+    return None
+
+
+def cable_std_freq(ch):
+    if ch == 1:         return 73.25                     # cable 1 (A-8)
+    if 2 <= ch <= 4:    return 55.25 + (ch - 2) * 6
+    if 5 <= ch <= 6:    return 77.25 + (ch - 5) * 6
+    if 7 <= ch <= 13:   return 175.25 + (ch - 7) * 6
+    if 14 <= ch <= 22:  return 121.25 + (ch - 14) * 6    # midband A..I  121.25 .. 169.25
+    if 23 <= ch <= 94:  return 217.25 + (ch - 23) * 6    # superband+    217.25 .. 643.25
+    if 95 <= ch <= 99:  return 91.25 + (ch - 95) * 6     # 91.25 .. 115.25 (between FM and ch7)
+    if 100 <= ch <= 135: return 649.25 + (ch - 100) * 6  # 649.25 .. 859.25 (comb continues)
+    return None
+
+
+def cable_irc_freq(ch):
+    # IRC == STD except channels 5 and 6 sit 2 MHz higher (on the 6-MHz comb).
+    f = cable_std_freq(ch)
+    if f is None:       return None
+    if ch == 5:         return 79.25
+    if ch == 6:         return 85.25
+    return f
+
+
+def cable_hrc_freq(ch):
+    # HRC: all carriers 1.25 MHz below STD, except 5/6 which are 0.75 MHz above STD.
+    f = cable_std_freq(ch)
+    if f is None:       return None
+    if ch in (5, 6):    return round(f + 0.75, 4)
+    return round(f - 1.25, 4)
+
+
+TABLES = {
+    "us-bcast":     {"label": "Broadcast",   "range": range(2, 70),  "freq": bcast_freq,      "group": "Broadcast"},
+    "us-cable":     {"label": "Cable STD",   "range": range(1, 136), "freq": cable_std_freq,  "group": "Cable"},
+    "us-cable-irc": {"label": "Cable IRC",   "range": range(1, 136), "freq": cable_irc_freq,  "group": "Cable IRC"},
+    "us-cable-hrc": {"label": "Cable HRC",   "range": range(1, 136), "freq": cable_hrc_freq,  "group": "Cable HRC"},
+}
+
+# Logical line inputs (for VCRs, game consoles, retro computers, etc.)
+INPUT_CHANNELS = {
+    "composite": {"label": "Composite In", "match": ("composite", "cvbs", "av")},
+    "svideo":    {"label": "S-Video In",   "match": ("s-video", "svideo", "s-vid")},
+}
+
+
+class ChannelError(Exception):
+    pass
+
+
+def parse_channel(cid):
+    """Return a normalized channel dict from a 'TABLE:CH' or 'input:NAME' id."""
+    cid = cid.strip()
+    if ":" not in cid:
+        raise ChannelError(f"bad channel id '{cid}' (expected TABLE:CH or input:NAME)")
+    table, _, rest = cid.partition(":")
+    table = table.lower()
+    if table == "input":
+        name = rest.lower()
+        if name not in INPUT_CHANNELS:
+            raise ChannelError(f"unknown input '{name}' (have: {', '.join(INPUT_CHANNELS)})")
+        return {
+            "id": f"input:{name}", "kind": "input", "input": name,
+            "label": INPUT_CHANNELS[name]["label"], "group": "Inputs",
+            "table": "input", "ch": None, "freq": None,
+        }
+    if table not in TABLES:
+        raise ChannelError(f"unknown table '{table}' (have: {', '.join(TABLES)})")
+    try:
+        ch = int(rest)
+    except ValueError:
+        raise ChannelError(f"channel must be an integer, got '{rest}'")
+    spec = TABLES[table]
+    freq = spec["freq"](ch)
+    if freq is None:
+        raise ChannelError(f"channel {ch} is not defined in table {table}")
+    return {
+        "id": f"{table}:{ch}", "kind": "tuner", "input": "television",
+        "label": f"{spec['label']} {ch}", "group": spec["group"],
+        "table": table, "ch": ch, "freq": round(freq, 4),
+    }
+
+
+def all_channels(tables):
+    out = []
+    for t in tables:
+        spec = TABLES[t]
+        for ch in spec["range"]:
+            if spec["freq"](ch) is not None:
+                out.append(parse_channel(f"{t}:{ch}"))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+#  Device interaction (v4l2-ctl wrappers)
+# --------------------------------------------------------------------------- #
+def run(cmd, **kw):
+    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def v4l2(cfg, *args):
+    return run([cfg["V4L2CTL"], "-d", cfg["DEVICE"], *args])
+
+
+def device_info(cfg):
+    """Probe driver, pixel format (MPEG => hardware encoder), and inputs."""
+    r = v4l2(cfg, "--all")
+    if r.returncode != 0:
+        raise ChannelError(f"v4l2-ctl --all failed: {r.stderr.strip() or r.stdout.strip()}")
+    out = r.stdout
+    drv = re.search(r"Driver name\s*:\s*(\S+)", out)
+    pix = re.search(r"Pixel Format\s*:\s*'?([A-Za-z0-9]+)'?", out)
+    card = re.search(r"Card type\s*:\s*(.+)", out)
+    info = {
+        "driver": drv.group(1) if drv else "?",
+        "card": card.group(1).strip() if card else "?",
+        "pixfmt": pix.group(1) if pix else "?",
+    }
+    info["hw_encoder"] = info["pixfmt"].upper().startswith("MPEG")
+    info["inputs"] = list_inputs(cfg)
+    return info
+
+
+def list_inputs(cfg):
+    r = v4l2(cfg, "--list-inputs")
+    inputs = []
+    if r.returncode == 0:
+        idx, name = None, None
+        for line in r.stdout.splitlines():
+            m = re.search(r"Input\s*:\s*(\d+)", line)
+            if m:
+                if idx is not None:
+                    inputs.append((idx, name or ""))
+                idx, name = int(m.group(1)), ""
+            m = re.search(r"Name\s*:\s*(.+)", line)
+            if m and idx is not None:
+                name = m.group(1).strip()
+        if idx is not None:
+            inputs.append((idx, name or ""))
+    return inputs
+
+
+def resolve_input_index(cfg, want):
+    """Map 'television'/'composite'/'svideo' to a device input index."""
+    inputs = list_inputs(cfg)
+    if not inputs:
+        return 0
+    if want == "television":
+        for i, name in inputs:
+            if "tele" in name.lower() or "tuner" in name.lower():
+                return i
+        return 0
+    keys = INPUT_CHANNELS[want]["match"]
+    for i, name in inputs:
+        low = name.lower()
+        if any(k in low for k in keys):
+            return i
+    raise ChannelError(f"device has no input matching '{want}'; available: "
+                       + ", ".join(f"{i}:{n}" for i, n in inputs))
+
+
+def set_standard(cfg):
+    # Try a few spellings; drivers/v4l2-ctl versions vary.
+    for val in (cfg["STANDARD"], "ntsc-m", "NTSC-M", "0x1000"):
+        if v4l2(cfg, f"--set-standard={val}").returncode == 0:
+            return True
+    return False
+
+
+def tune(cfg, chan):
+    """Select input, standard, and (for tuner channels) frequency."""
+    idx = resolve_input_index(cfg, chan["input"])
+    v4l2(cfg, f"--set-input={idx}")
+    set_standard(cfg)
+    if chan["kind"] == "tuner":
+        r = v4l2(cfg, f"--set-freq={chan['freq']:.4f}")
+        if r.returncode != 0:
+            raise ChannelError(f"set-freq failed: {r.stderr.strip() or r.stdout.strip()}")
+
+
+def get_signal(cfg):
+    """Return (signal_pct, afc_hz) or (None, None)."""
+    r = v4l2(cfg, "--get-tuner")
+    if r.returncode != 0:
+        return None, None
+    m = re.search(r"Signal strength/AFC\s*:\s*(\d+)%\s*/\s*(-?\d+)", r.stdout)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    return None, None
+
+
+# --------------------------------------------------------------------------- #
+#  Locking (single tuner -> mutual exclusion between stream and scan)
+# --------------------------------------------------------------------------- #
+import fcntl
+
+
+class TunerLock:
+    def __init__(self, path, wait=0):
+        self.path = path
+        self.wait = float(wait)
+        self.fh = None
+
+    def __enter__(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        self.fh = open(self.path, "w")
+        deadline = time.time() + self.wait
+        while True:
+            try:
+                fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except OSError:
+                if time.time() >= deadline:
+                    self.fh.close()
+                    self.fh = None
+                    raise ChannelError("tuner is busy (another stream/scan holds the lock)")
+                time.sleep(0.25)
+
+    def __exit__(self, *a):
+        if self.fh:
+            try:
+                fcntl.flock(self.fh, fcntl.LOCK_UN)
+            finally:
+                self.fh.close()
+
+
+# --------------------------------------------------------------------------- #
+#  Streaming  (this is what TVHeadend's pipe:// mux invokes)
+# --------------------------------------------------------------------------- #
+def build_ffmpeg_cmd(cfg, info):
+    """Return the ffmpeg argv that writes MPEG-TS to stdout."""
+    ff = cfg["FFMPEG"]
+    acodec = cfg["AUDIO_CODEC"].lower()
+    aargs = {
+        "copy": ["-c:a", "copy"],
+        "mp2":  ["-c:a", "mp2", "-b:a", "224k"],
+        "ac3":  ["-c:a", "ac3", "-b:a", "224k"],
+    }.get(acodec, ["-c:a", "copy"])
+
+    if info["hw_encoder"]:
+        # Device already emits an MPEG-2 program stream; just demux + remux to TS.
+        base = [ff, "-hide_banner", "-loglevel", "error",
+                "-fflags", "+genpts", "-f", "mpeg", "-i", cfg["DEVICE"],
+                "-c:v", "copy", *aargs,
+                "-f", "mpegts", "-mpegts_flags", "+resend_headers", "pipe:1"]
+        if cfg["CAPTURE_VIA_CAT"] == "1":
+            base[base.index(cfg["DEVICE"])] = "pipe:0"   # read from cat instead
+        return base
+
+    # Raw device: software-encode video + capture audio via ALSA.
+    adev = cfg["RAW_AUDIO_DEV"] or autodetect_alsa(cfg, info)
+    cmd = [ff, "-hide_banner", "-loglevel", "error",
+           "-f", "v4l2", "-i", cfg["DEVICE"]]
+    if adev:
+        cmd += ["-f", "alsa", "-ac", "2", "-ar", "48000", "-i", adev]
+    cmd += ["-c:v", "mpeg2video", "-b:v", cfg["RAW_VBITRATE"],
+            "-filter:v", "yadif=0:-1:0"]
+    cmd += (aargs if acodec != "copy" else ["-c:a", "mp2", "-b:a", "224k"])
+    cmd += ["-f", "mpegts", "pipe:1"]
+    return cmd
+
+
+def autodetect_alsa(cfg, info):
+    r = run(["arecord", "-l"])
+    if r.returncode != 0:
+        return ""
+    # Prefer a card whose name resembles the tuner card.
+    want = info["card"].split()[0].lower() if info["card"] != "?" else ""
+    best = None
+    for line in r.stdout.splitlines():
+        m = re.search(r"card (\d+):\s*(\S+).*device (\d+)", line)
+        if m:
+            cardno, cardname, devno = m.group(1), m.group(2), m.group(3)
+            cand = f"hw:{cardno},{devno}"
+            if best is None:
+                best = cand
+            if want and want in cardname.lower():
+                return cand
+    return best or ""
+
+
+def cmd_stream(cfg, args):
+    chan = parse_channel(args.channel)
+    info = device_info(cfg)
+    wait = float(args.wait if args.wait is not None else cfg["SCAN_LOCK_WAIT"])
+    # Hold the lock only across tuning; then exec ffmpeg (directly, or with a cat
+    # child feeding its stdin) so TVHeadend's SIGTERM reaches ffmpeg and the tuner
+    # is released cleanly when the subscription ends.
+    lock = TunerLock(cfg["LOCK_FILE"], wait=wait)
+    lock.__enter__()
+    try:
+        tune(cfg, chan)
+        if cfg["VIDEO_BITRATE"] and info["hw_encoder"]:
+            v4l2(cfg, f"--set-ctrl=video_bitrate={cfg['VIDEO_BITRATE']}")
+        time.sleep(0.4)  # let the encoder settle before TVH starts reading
+        cmd = build_ffmpeg_cmd(cfg, info)
+    except Exception:
+        lock.__exit__()
+        raise
+    # NB: we intentionally do NOT release the flock here. We replace this process
+    # with ffmpeg (or the cat|ffmpeg pipeline); the lock fd is held by ffmpeg until
+    # it exits, which is exactly the lifetime of the subscription. Python marks fds
+    # non-inheritable by default (PEP 446), so we must explicitly let it cross exec().
+    os.set_inheritable(lock.fh.fileno(), True)
+    sys.stderr.write(f"ntsc-tvh: streaming {chan['id']} "
+                     f"({'tuner '+format(chan['freq'],'.3f')+' MHz' if chan['freq'] else chan['input']}) "
+                     f"via {'HW-MPEG' if info['hw_encoder'] else 'raw-encode'}\n")
+    sys.stderr.flush()
+    if info["hw_encoder"] and cfg["CAPTURE_VIA_CAT"] == "1":
+        # Feed the device through `cat` into ffmpeg's stdin rather than letting ffmpeg
+        # open the node itself (which is empty/unreliable on some ffmpeg builds).
+        # We spawn cat as a child, wire its output to our fd 0, then exec ffmpeg in
+        # place: ffmpeg keeps our PID (so TVHeadend's SIGTERM hits it directly and the
+        # tuner lock is released cleanly) and inherits our stdout (pipe:1 -> TVHeadend).
+        # cmd already has its input rewritten to "pipe:0" by build_ffmpeg_cmd().
+        cat = subprocess.Popen(["cat", cfg["DEVICE"]], stdout=subprocess.PIPE)
+        os.dup2(cat.stdout.fileno(), 0)
+        cat.stdout.close()
+        os.execvp(cmd[0], cmd)
+    os.execvp(cmd[0], cmd)
+
+
+# --------------------------------------------------------------------------- #
+#  Scanning
+# --------------------------------------------------------------------------- #
+def video_variance(cfg, info, frames=6):
+    """Grab a few gray frames and return the max per-frame luma std-dev.
+    Flat 'no signal' (forced blue/black) screens -> ~0; real pictures -> high."""
+    if info["hw_encoder"]:
+        src = ["-f", "mpeg", "-i", cfg["DEVICE"]]
+    else:
+        src = ["-f", "v4l2", "-i", cfg["DEVICE"]]
+    cmd = [cfg["FFMPEG"], "-hide_banner", "-loglevel", "error", *src,
+           "-an", "-vf", "fps=2,scale=160:120,format=gray",
+           "-frames:v", str(frames), "-f", "rawvideo", "pipe:1"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=8)
+    except subprocess.TimeoutExpired:
+        return 0.0
+    data = r.stdout
+    fsize = 160 * 120
+    best = 0.0
+    for i in range(0, len(data) - fsize + 1, fsize):
+        frame = data[i:i + fsize]
+        # mean / std-dev from a 256-bin histogram (fast, stdlib only)
+        hist = [0] * 256
+        for v in range(256):
+            hist[v] = frame.count(v)
+        n = sum(hist)
+        if n == 0:
+            continue
+        mean = sum(v * c for v, c in enumerate(hist)) / n
+        var = sum(c * (v - mean) ** 2 for v, c in enumerate(hist)) / n
+        best = max(best, var ** 0.5)
+    return best
+
+
+def is_active(cfg, info, chan, method, thr, var_min):
+    sig, afc = get_signal(cfg)
+    sig_ok = (sig is not None and sig >= thr)
+    if method == "signal":
+        return sig_ok, {"signal": sig, "afc": afc}
+    var = video_variance(cfg, info)
+    vid_ok = var >= var_min
+    if method == "video":
+        return vid_ok, {"signal": sig, "afc": afc, "var": round(var, 1)}
+    return (sig_ok and vid_ok), {"signal": sig, "afc": afc, "var": round(var, 1)}
+
+
+def cmd_scan(cfg, args):
+    tables = args.tables.split(",") if args.tables else cfg["SCAN_TABLES"].split(",")
+    tables = [t.strip() for t in tables if t.strip()]
+    for t in tables:
+        if t not in TABLES:
+            sys.exit(f"unknown table '{t}' (have: {', '.join(TABLES)})")
+    method = (args.method or cfg["SCAN_METHOD"]).lower()
+    thr = int(args.threshold if args.threshold is not None else cfg["SCAN_THRESHOLD"])
+    var_min = float(cfg["SCAN_VAR_MIN"])
+    dwell = float(args.dwell if args.dwell is not None else cfg["SCAN_DWELL"])
+    wait = float(args.wait if args.wait is not None else cfg["SCAN_LOCK_WAIT"])
+
+    info = device_info(cfg)
+    cands = all_channels(tables)
+    found = []
+    sys.stderr.write(f"Scanning {len(cands)} channels across [{', '.join(tables)}] "
+                     f"using method='{method}' threshold={thr}% ...\n")
+
+    try:
+        with TunerLock(cfg["LOCK_FILE"], wait=wait):
+            set_standard(cfg)
+            idx = resolve_input_index(cfg, "television")
+            v4l2(cfg, f"--set-input={idx}")
+            for c in cands:
+                v4l2(cfg, f"--set-freq={c['freq']:.4f}")
+                time.sleep(dwell)
+                active, metrics = is_active(cfg, info, c, method, thr, var_min)
+                tag = "ACTIVE" if active else "  --  "
+                extra = " ".join(f"{k}={v}" for k, v in metrics.items() if v is not None)
+                sys.stderr.write(f"  [{tag}] {c['id']:<16} {c['freq']:>8.3f} MHz  {extra}\n")
+                if active:
+                    rec = dict(c); rec.update(metrics)
+                    found.append(rec)
+    except ChannelError as exc:
+        sys.exit(f"scan aborted: {exc}")
+
+    state = {
+        "device": cfg["DEVICE"],
+        "card": info["card"],
+        "scanned_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "method": method, "threshold": thr, "tables": tables,
+        "active": found,
+    }
+    save_state(cfg, state)
+    sys.stderr.write(f"\nFound {len(found)} active channel(s). Saved to {cfg['STATE_FILE']}.\n")
+    if not args.no_m3u:
+        write_m3u(cfg, state)
+        sys.stderr.write(f"Wrote playlist {cfg['M3U_FILE']}.\n")
+
+
+# --------------------------------------------------------------------------- #
+#  State + M3U
+# --------------------------------------------------------------------------- #
+def save_state(cfg, state):
+    os.makedirs(os.path.dirname(cfg["STATE_FILE"]), exist_ok=True)
+    tmp = cfg["STATE_FILE"] + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(state, fh, indent=2)
+    os.replace(tmp, cfg["STATE_FILE"])
+
+
+def load_state(cfg):
+    try:
+        with open(cfg["STATE_FILE"]) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def self_path(cfg):
+    p = cfg["SELF_PATH"].strip()
+    if p:
+        return p
+    return os.path.realpath(sys.argv[0])
+
+
+def m3u_entries(cfg, state):
+    """Yield (chan_dict) for active tuner channels + (optionally) line inputs."""
+    if state:
+        for c in state.get("active", []):
+            yield c
+    if cfg["INPUTS_ALWAYS_ACTIVE"] == "1":
+        for name in INPUT_CHANNELS:
+            yield parse_channel(f"input:{name}")
+
+
+def write_m3u(cfg, state):
+    sp = self_path(cfg)
+    lines = ["#EXTM3U"]
+    for c in m3u_entries(cfg, state):
+        cid = c["id"]
+        label = c.get("label", cid)
+        group = c.get("group", "NTSC")
+        # The pipe URL IS the mux identity in TVHeadend's auto-network -> keep it
+        # stable (no scan timestamps / volatile params) so rescans don't churn muxes.
+        url = f"pipe://{sp} stream {cid}"
+        lines.append(f'#EXTINF:-1 tvg-id="{cid}" tvg-name="{label}" group-title="{group}",{label}')
+        lines.append(url)
+    os.makedirs(os.path.dirname(cfg["M3U_FILE"]), exist_ok=True)
+    tmp = cfg["M3U_FILE"] + ".tmp"
+    with open(tmp, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    os.replace(tmp, cfg["M3U_FILE"])
+
+
+def cmd_m3u(cfg, args):
+    state = load_state(cfg)
+    if not state and cfg["INPUTS_ALWAYS_ACTIVE"] != "1":
+        sys.exit("no scan state found; run `ntsc-tvh scan` first")
+    if args.output:
+        cfg = dict(cfg); cfg["M3U_FILE"] = args.output
+    write_m3u(cfg, state)
+    if args.stdout:
+        with open(cfg["M3U_FILE"]) as fh:
+            sys.stdout.write(fh.read())
+    else:
+        print(f"wrote {cfg['M3U_FILE']}")
+
+
+# --------------------------------------------------------------------------- #
+#  list / status / tune / signal / doctor
+# --------------------------------------------------------------------------- #
+def cmd_list(cfg, args):
+    if args.active_only:
+        state = load_state(cfg)
+        chans = list(m3u_entries(cfg, state))
+        if not chans:
+            print("no active channels (run a scan first)")
+            return
+    else:
+        tables = args.tables.split(",") if args.tables else list(TABLES)
+        chans = all_channels([t.strip() for t in tables])
+        if cfg["INPUTS_ALWAYS_ACTIVE"] == "1":
+            chans += [parse_channel(f"input:{n}") for n in INPUT_CHANNELS]
+    if args.json:
+        print(json.dumps(chans, indent=2))
+        return
+    for c in chans:
+        freq = f"{c['freq']:>8.3f} MHz" if c.get("freq") else "  line input"
+        print(f"{c['id']:<18} {freq}   {c['label']}")
+
+
+def cmd_tune(cfg, args):
+    chan = parse_channel(args.channel)
+    with TunerLock(cfg["LOCK_FILE"], wait=float(args.wait or 0)):
+        tune(cfg, chan)
+    print(f"tuned {chan['id']}"
+          + (f" -> {chan['freq']:.3f} MHz" if chan["freq"] else f" (input {chan['input']})"))
+
+
+def cmd_signal(cfg, args):
+    chan = parse_channel(args.channel)
+    with TunerLock(cfg["LOCK_FILE"], wait=float(args.wait or 0)):
+        tune(cfg, chan)
+        time.sleep(float(cfg["SCAN_DWELL"]))
+        sig, afc = get_signal(cfg)
+    if sig is None:
+        print(f"{chan['id']}: tuner reported no signal metric")
+    else:
+        print(f"{chan['id']}  {chan['freq']:.3f} MHz  signal={sig}%  afc={afc} Hz")
+
+
+def cmd_status(cfg, args):
+    state = load_state(cfg)
+    if not state:
+        print("no scan has been run yet")
+    else:
+        print(f"device:     {state.get('device')}  ({state.get('card','?')})")
+        print(f"last scan:  {state.get('scanned_at')}  "
+              f"method={state.get('method')} threshold={state.get('threshold')}%")
+        print(f"tables:     {', '.join(state.get('tables', []))}")
+        print(f"active:     {len(state.get('active', []))} channel(s)")
+    print(f"timer:      {timer_status()}")
+
+
+def cmd_doctor(cfg, args):
+    ok = True
+    def chk(label, good, detail=""):
+        nonlocal ok
+        ok = ok and good
+        print(f"  [{'OK' if good else '!!'}] {label}" + (f"  {detail}" if detail else ""))
+
+    print("ntsc-tvh doctor")
+    chk("ffmpeg present", shutil.which(cfg["FFMPEG"]) is not None, cfg["FFMPEG"])
+    chk("v4l2-ctl present", shutil.which(cfg["V4L2CTL"]) is not None, cfg["V4L2CTL"])
+    chk("device node exists", os.path.exists(cfg["DEVICE"]), cfg["DEVICE"])
+    if os.path.exists(cfg["DEVICE"]):
+        chk("device readable", os.access(cfg["DEVICE"], os.R_OK),
+            "add the tvheadend user to the 'video' group if not")
+        try:
+            info = device_info(cfg)
+            chk("driver detected", info["driver"] != "?", info["driver"])
+            print(f"       card:    {info['card']}")
+            print(f"       pixfmt:  {info['pixfmt']}  "
+                  f"({'hardware MPEG encoder' if info['hw_encoder'] else 'raw frames -> software encode'})")
+            ins = ", ".join(f"{i}:{n}" for i, n in info["inputs"]) or "none"
+            print(f"       inputs:  {ins}")
+            if not info["hw_encoder"]:
+                adev = cfg["RAW_AUDIO_DEV"] or autodetect_alsa(cfg, info)
+                chk("ALSA audio device (raw path)", bool(adev), adev or "set RAW_AUDIO_DEV")
+        except ChannelError as exc:
+            chk("device probe", False, str(exc))
+    print("status:", "all good" if ok else "issues found")
+    sys.exit(0 if ok else 1)
+
+
+# --------------------------------------------------------------------------- #
+#  systemd timer for periodic rescan
+# --------------------------------------------------------------------------- #
+SERVICE_UNIT = "/etc/systemd/system/ntsc-tvh-scan.service"
+TIMER_UNIT = "/etc/systemd/system/ntsc-tvh-scan.timer"
+
+
+def timer_status():
+    if not os.path.exists(TIMER_UNIT):
+        return "not installed (rescan = none)"
+    r = run(["systemctl", "is-enabled", "ntsc-tvh-scan.timer"])
+    return f"installed, {r.stdout.strip() or 'unknown'} (daily rescan)"
+
+
+def cmd_install_timer(cfg, args):
+    if os.geteuid() != 0:
+        sys.exit("install-timer must be run as root (sudo)")
+    if args.period == "none":
+        for u in (TIMER_UNIT, SERVICE_UNIT):
+            if os.path.exists(u):
+                os.remove(u)
+        run(["systemctl", "disable", "--now", "ntsc-tvh-scan.timer"])
+        run(["systemctl", "daemon-reload"])
+        print("rescan timer removed (period = none)")
+        return
+
+    sp = self_path(cfg)
+    user = args.user
+    svc = f"""[Unit]
+Description=Rescan NTSC analog channels and refresh the TVHeadend playlist
+After=network.target
+
+[Service]
+Type=oneshot
+User={user}
+ExecStart={sp} scan --wait 30
+# scan already writes the M3U; this is just an explicit safety net:
+ExecStartPost={sp} m3u
+"""
+    tmr = """[Unit]
+Description=Daily NTSC analog channel rescan
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
+"""
+    with open(SERVICE_UNIT, "w") as fh:
+        fh.write(svc)
+    with open(TIMER_UNIT, "w") as fh:
+        fh.write(tmr)
+    run(["systemctl", "daemon-reload"])
+    run(["systemctl", "enable", "--now", "ntsc-tvh-scan.timer"])
+    print(f"installed daily rescan timer (runs as {user}); next run:")
+    r = run(["systemctl", "list-timers", "ntsc-tvh-scan.timer", "--no-pager"])
+    print(r.stdout.strip() or "  (use `systemctl list-timers` to verify)")
+
+
+# --------------------------------------------------------------------------- #
+#  CLI
+# --------------------------------------------------------------------------- #
+def build_parser():
+    p = argparse.ArgumentParser(prog="ntsc-tvh",
+                                description="Analog NTSC tuning/streaming/scanning for TVHeadend pipe:// muxes")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sp = sub.add_parser("doctor", help="check device, codecs, permissions")
+    sp.set_defaults(func=cmd_doctor)
+
+    sp = sub.add_parser("list", help="list channels")
+    sp.add_argument("--tables", help="comma list, e.g. us-bcast,us-cable")
+    sp.add_argument("--active-only", action="store_true", help="only channels from the last scan")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_list)
+
+    sp = sub.add_parser("tune", help="tune only (debug)")
+    sp.add_argument("channel")
+    sp.add_argument("--wait", type=float, help="seconds to wait for tuner lock")
+    sp.set_defaults(func=cmd_tune)
+
+    sp = sub.add_parser("signal", help="tune and report signal strength (debug)")
+    sp.add_argument("channel")
+    sp.add_argument("--wait", type=float)
+    sp.set_defaults(func=cmd_signal)
+
+    sp = sub.add_parser("stream", help="tune + emit MPEG-TS on stdout (TVHeadend calls this)")
+    sp.add_argument("channel")
+    sp.add_argument("--wait", type=float, help="seconds to wait for tuner lock")
+    sp.set_defaults(func=cmd_stream)
+
+    sp = sub.add_parser("scan", help="scan channels and save active ones")
+    sp.add_argument("--tables", help="comma list to scan (default from config)")
+    sp.add_argument("--method", choices=["signal", "video", "both"])
+    sp.add_argument("--threshold", type=int, help="signal %% threshold")
+    sp.add_argument("--dwell", type=float, help="settle seconds per channel")
+    sp.add_argument("--wait", type=float, help="seconds to wait for tuner lock (0 = abort if busy)")
+    sp.add_argument("--no-m3u", action="store_true", help="don't regenerate the playlist")
+    sp.set_defaults(func=cmd_scan)
+
+    sp = sub.add_parser("m3u", help="write the M3U playlist of active channels")
+    sp.add_argument("--output", help="output path (default from config)")
+    sp.add_argument("--stdout", action="store_true", help="also print the playlist")
+    sp.set_defaults(func=cmd_m3u)
+
+    sp = sub.add_parser("install-timer", help="install/remove the periodic rescan timer")
+    sp.add_argument("--period", choices=["24h", "none"], default="24h",
+                    help="24h = daily rescan, none = remove the timer")
+    sp.add_argument("--user", default="hts", help="user to run the scan as (default: hts)")
+    sp.set_defaults(func=cmd_install_timer)
+
+    sp = sub.add_parser("status", help="show last-scan summary")
+    sp.set_defaults(func=cmd_status)
+    return p
+
+
+def main():
+    cfg = load_config()
+    args = build_parser().parse_args()
+    try:
+        args.func(cfg, args)
+    except ChannelError as exc:
+        sys.exit(f"error: {exc}")
+    except BrokenPipeError:
+        # downstream (TVHeadend / head of pipe) went away; exit quietly
+        try:
+            sys.stdout.close()
+        except Exception:
+            pass
+        os._exit(0)
+
+
+if __name__ == "__main__":
+    main()
