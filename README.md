@@ -517,3 +517,33 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
   documenting the firmware2/xHCI requirement, the analog/DVB mutual exclusion,
   the lock permission/ownership trap, the M3U-URL trailing-newline trap, and the
   EPG-vs-scan contention — all encountered and resolved during the bring-up.
+
+---
+
+## 14. Development & tests
+
+The tests need no tuner and no pip installs (stdlib `unittest` only). They load the
+script as a module and replace `v4l2-ctl`, `ffmpeg`, `cat` and `exec` with fakes that
+read canned output from `tests/fixtures/`:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+They cover the frequency plans, channel-ID parsing, config precedence, `v4l2-ctl`
+output parsing, the ffmpeg command line, the `cat | ffmpeg` exec handoff with the
+inheritable tuner lock, scan → state → M3U, and the exact `pipe://` URL format. CI
+(`.github/workflows/test.yml`) runs them on Python 3.10–3.14 on every push.
+
+The fixtures are modelled on `v4l2-ctl` output, not captured from the real box. To
+pin them to the real hardware, capture these on the OptiPlex and replace the
+matching `tests/fixtures/*.txt` files:
+
+```bash
+v4l2-ctl -d /dev/video0 --all          > v4l2-all-hvr1950.txt
+v4l2-ctl -d /dev/video0 --list-inputs  > v4l2-list-inputs-hvr1950.txt
+v4l2-ctl -d /dev/video0 --get-tuner    > v4l2-get-tuner-locked.txt   # tuned to a live channel
+```
+
+Tests marked `@unittest.expectedFailure` record known bugs. When a fix lands, the
+test passes unexpectedly and the run fails until you remove the decorator.

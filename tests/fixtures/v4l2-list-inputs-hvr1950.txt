@@ -1,0 +1,32 @@
+ioctl: VIDIOC_ENUMINPUT
+	Input       : 0
+	Name        : television
+	Type        : 0x00000001 (Tuner)
+	Audioset    : 0x00000000
+	Tuner       : 0x00000000
+	Standard    : 0x000000000000B000 ( NTSC )
+	Status      : ok
+
+	Input       : 1
+	Name        : radio
+	Type        : 0x00000001 (Tuner)
+	Audioset    : 0x00000000
+	Tuner       : 0x00000001
+	Standard    : 0x000000000000B000 ( NTSC )
+	Status      : ok
+
+	Input       : 2
+	Name        : s-video
+	Type        : 0x00000002 (Camera)
+	Audioset    : 0x00000000
+	Tuner       : 0x00000000
+	Standard    : 0x000000000000B000 ( NTSC )
+	Status      : ok
+
+	Input       : 3
+	Name        : composite
+	Type        : 0x00000002 (Camera)
+	Audioset    : 0x00000000
+	Tuner       : 0x00000000
+	Standard    : 0x000000000000B000 ( NTSC )
+	Status      : ok

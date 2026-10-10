@@ -1,0 +1,25 @@
+Driver Info:
+	Driver name      : pvrusb2
+	Card type        : WinTV HVR-1950 Model 751xx
+	Bus info         : usb-0000:00:1d.0-1.2
+	Driver version   : 6.8.12
+	Capabilities     : 0x85250011
+		Video Capture
+		Tuner
+		Audio
+		Radio
+		Read/Write
+		Extended Pix Format
+		Device Capabilities
+Priority: 2
+Video input : 0 (television: ok)
+Audio input : 0 (PVRUSB2 Audio)
+Frequency for tuner 0: 1072 (67.000000 MHz)
+Video Standard = 0x0000b000
+	NTSC-M/M-JP/M-KR
+Format Video Capture:
+	Width/Height      : 720/480
+	Pixel Format      : 'MPEG' (MPEG-1/2/4 Multiplexed)
+	Field             : Interlaced
+	Bytes per Line    : 0
+	Size Image        : 32768

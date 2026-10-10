@@ -1,0 +1,8 @@
+Tuner 0:
+	Name                 : pvrusb2 tuner
+	Type                 : Analog TV
+	Capabilities         : 62.5 kHz multi-standard stereo lang1 lang2 freq-bands 
+	Frequency range      : 44.000 MHz - 958.000 MHz
+	Signal strength/AFC  : 87%/-12
+	Current audio mode   : stereo
+	Available subchannels: mono stereo 
