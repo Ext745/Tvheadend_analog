@@ -72,7 +72,7 @@ sudo apt install v4l-utils ffmpeg          # Debian/Ubuntu
 
 ```bash
 sudo install -m 755 ntsc-tvh        /usr/local/bin/ntsc-tvh
-sudo install -m 644 ntsc-tvh.conf   /etc/ntsc-tvh.conf      # optional, edit to taste
+sudo install -m 644 examples/ntsc-tvh.conf /etc/ntsc-tvh.conf     # optional, edit to taste
 sudo mkdir -p /var/lib/ntsc-tvh
 ```
 
@@ -110,7 +110,7 @@ node, and this script. Firmware is loaded by the **host** kernel (the container
 only sees the resulting `/dev/video0`), so the firmware + USB-2 requirements from
 §2 are host-side and must be satisfied on the host *before* Docker is involved.
 
-A working `docker-compose.yml` (analog-only; see the shipped `docker-compose.yml`
+A working `docker-compose.yml` (analog-only; see the shipped `examples/docker-compose.yml`
 for the annotated version):
 
 ```yaml
