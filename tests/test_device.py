@@ -149,13 +149,12 @@ class CmdSignal(DeviceTestCase):
         self.assertEqual(self.signal("us-bcast:7"),
                          "us-bcast:7  175.250 MHz  signal=87%  afc=-12 Hz\n")
 
-    @unittest.expectedFailure
-    def test_line_input(self):
-        # KNOWN BUG: `ntsc-tvh signal input:composite` formats chan['freq'] (None) with
-        # :.3f and dies with TypeError whenever the tuner reports a signal metric.
-        # Remove @expectedFailure once cmd_signal handles line inputs.
-        self.use(FakeV4L2())
-        self.assertIn("input:composite", self.signal("input:composite"))
+    def test_line_input_selects_input_without_measuring(self):
+        fake = self.use(FakeV4L2())
+        self.assertEqual(self.signal("input:composite"),
+                         "input:composite: selected; line inputs have no RF signal to measure\n")
+        self.assertIn("--set-input=3", fake.opts())
+        self.assertNotIn("--get-tuner", fake.opts())
 
 
 if __name__ == "__main__":

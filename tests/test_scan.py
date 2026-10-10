@@ -19,11 +19,18 @@ HW = {"driver": "pvrusb2", "card": "WinTV HVR-1950 Model 751xx", "pixfmt": "MPEG
 
 class VideoVariance(unittest.TestCase):
 
+    def setUp(self):
+        self.cat = mock.Mock()
+        p = mock.patch("ntsc_tvh.subprocess.Popen", return_value=self.cat)
+        self.popen = p.start()
+        self.addCleanup(p.stop)
+
     def variance(self, data, info=HW, **cfg):
         result = subprocess.CompletedProcess([], 0, stdout=data, stderr=b"")
         with mock.patch("ntsc_tvh.subprocess.run", return_value=result) as run:
             v = ntsc.video_variance(make_cfg(**cfg), info)
         self.cmd = run.call_args[0][0]
+        self.stdin = run.call_args[1]["stdin"]
         return v
 
     def test_flat_no_sync_screen_is_zero(self):
@@ -42,27 +49,38 @@ class VideoVariance(unittest.TestCase):
     def test_empty_capture_is_zero(self):
         self.assertEqual(self.variance(b""), 0.0)
 
-    def test_timeout_is_zero(self):
+    def test_timeout_is_zero_and_stops_cat(self):
         with mock.patch("ntsc_tvh.subprocess.run",
                         side_effect=subprocess.TimeoutExpired("ffmpeg", 8)):
             self.assertEqual(ntsc.video_variance(make_cfg(), HW), 0.0)
+        self.cat.kill.assert_called_once_with()
+        self.cat.wait.assert_called_once_with()
 
     def test_capture_command(self):
         self.variance(b"")
         self.assertEqual(self.cmd[self.cmd.index("-vf") + 1], "fps=2,scale=160:120,format=gray")
         self.assertEqual(self.cmd[-5:], ["-frames:v", "6", "-f", "rawvideo", "pipe:1"])
-        self.variance(b"", info=dict(HW, hw_encoder=False))
-        self.assertEqual(self.cmd[4:8], ["-f", "v4l2", "-i", "/dev/video0"])
 
-    @unittest.expectedFailure
-    def test_hw_capture_honours_capture_via_cat(self):
-        # KNOWN BUG: with CAPTURE_VIA_CAT=1 (the default), `stream` feeds ffmpeg through
-        # cat because ffmpeg opening the MPEG node directly yields an empty stream on
-        # several builds -- but video_variance() still opens the node directly. On those
-        # builds every frame grab is empty, var=0, and SCAN_METHOD=video|both finds
-        # nothing. Remove @expectedFailure once the video probe reads via cat too.
-        self.variance(b"", CAPTURE_VIA_CAT="1")
-        self.assertNotIn("/dev/video0", self.cmd)
+    def test_hw_reads_via_cat_like_stream(self):
+        # ffmpeg opening the MPEG node directly is empty on some builds (see CAPTURE_VIA_CAT).
+        self.variance(b"")
+        self.popen.assert_called_once_with(["cat", "/dev/video0"], stdout=subprocess.PIPE)
+        self.assertEqual(self.cmd[4:8], ["-f", "mpeg", "-i", "pipe:0"])
+        self.assertIs(self.stdin, self.cat.stdout)
+        self.cat.kill.assert_called_once_with()
+        self.cat.wait.assert_called_once_with()
+        self.cat.stdout.close.assert_called_once_with()
+
+    def test_hw_direct_read_when_cat_disabled(self):
+        self.variance(b"", CAPTURE_VIA_CAT="0")
+        self.popen.assert_not_called()
+        self.assertEqual(self.cmd[4:8], ["-f", "mpeg", "-i", "/dev/video0"])
+        self.assertIsNone(self.stdin)
+
+    def test_raw_device_reads_v4l2_directly(self):
+        self.variance(b"", info=dict(HW, hw_encoder=False))
+        self.popen.assert_not_called()
+        self.assertEqual(self.cmd[4:8], ["-f", "v4l2", "-i", "/dev/video0"])
 
 
 class IsActive(unittest.TestCase):

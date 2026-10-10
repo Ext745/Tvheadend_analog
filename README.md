@@ -378,7 +378,8 @@ not the script.
 
 ## 10. Configuration reference
 
-All keys live in `/etc/ntsc-tvh.conf` (or as env vars). The most useful:
+All keys live in `/etc/ntsc-tvh.conf` (or as env vars), one `KEY=VALUE` per line;
+a `# comment` after whitespace is ignored. The most useful:
 
 | Key                    | Default                          | Purpose                                   |
 |------------------------|----------------------------------|-------------------------------------------|
@@ -386,7 +387,7 @@ All keys live in `/etc/ntsc-tvh.conf` (or as env vars). The most useful:
 | `LOCK_FILE`            | `/var/lib/ntsc-tvh/ntsc-tvh.lock`| tuner lock (in state dir, not `/run/lock`)|
 | `AUDIO_CODEC`          | `copy`                           | `copy`/`mp2`/`ac3` (copy = native, 0 CPU) |
 | `VIDEO_BITRATE`        | *(driver default)*               | pin HW MPEG-2 bitrate, e.g. `6000000`     |
-| `CAPTURE_VIA_CAT`      | `1`                              | `1` = `cat dev | ffmpeg` (reliable read)   |
+| `CAPTURE_VIA_CAT`      | `1`                              | `1` = `cat dev \| ffmpeg` (reliable read; stream + video scan) |
 | `SCAN_TABLES`          | `us-bcast,us-cable`              | plans walked by `scan`                    |
 | `SCAN_METHOD`          | `signal`                        | `signal`/`video`/`both`                   |
 | `SCAN_THRESHOLD`       | `35`                             | signal % cutoff                           |
@@ -517,6 +518,17 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
   documenting the firmware2/xHCI requirement, the analog/DVB mutual exclusion,
   the lock permission/ownership trap, the M3U-URL trailing-newline trap, and the
   EPG-vs-scan contention — all encountered and resolved during the bring-up.
+
+### Since v2
+
+- **Inline comments in the config file work.** `KEY=value   # note` used to keep
+  the comment as part of the value, so uncommenting a line of the example config
+  broke it (e.g. `SCAN_THRESHOLD` crashed `scan`).
+- **The `video`/`both` scan methods honour `CAPTURE_VIA_CAT`.** The picture probe
+  now reads the HW-MPEG node through `cat` like `stream` does, instead of having
+  ffmpeg open it directly (empty on some ffmpeg builds, so every channel looked flat).
+- **`ntsc-tvh signal input:composite`** selects the input and says there is no RF
+  signal to measure, instead of crashing.
 
 ---
 

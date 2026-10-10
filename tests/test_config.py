@@ -59,6 +59,20 @@ class LoadConfig(unittest.TestCase):
         self.assertNotIn("NOT_A_KEY", cfg)
         self.assertEqual(cfg["M3U_FILE"], ntsc.DEFAULTS["M3U_FILE"])
 
+    def test_inline_comments_are_stripped(self):
+        self.write("SCAN_THRESHOLD=40           # signal-strength %\n"
+                   "VIDEO_BITRATE=              # blank = driver default\n"
+                   'DEVICE="/dev/video1"  # quoted\n'
+                   "RAW_AUDIO_DEV=hw:1,0\t# tab before the comment\n"
+                   "FFMPEG=/opt/ff#1/ffmpeg\n")
+        with clean_env():
+            cfg = ntsc.load_config()
+        self.assertEqual(cfg["SCAN_THRESHOLD"], "40")
+        self.assertEqual(cfg["VIDEO_BITRATE"], "")
+        self.assertEqual(cfg["DEVICE"], "/dev/video1")
+        self.assertEqual(cfg["RAW_AUDIO_DEV"], "hw:1,0")
+        self.assertEqual(cfg["FFMPEG"], "/opt/ff#1/ffmpeg")   # '#' without whitespace is data
+
     def test_env_overrides_file(self):
         self.write("DEVICE=/dev/video1\nSCAN_DWELL=2\n")
         with clean_env(DEVICE="/dev/video9", NOT_A_KEY="x"):
@@ -106,13 +120,8 @@ class ExampleConfig(unittest.TestCase):
                 self.assertEqual(value, "/usr/local/bin/ntsc-tvh" if key == "SELF_PATH"
                                  else ntsc.DEFAULTS[key])
 
-    @unittest.expectedFailure
-    def test_uncommented_example_lines_load_as_defaults(self):
-        # KNOWN BUG: load_config() does not strip inline "# ..." comments, and the
-        # example puts one on almost every line. Uncommenting e.g.
-        #   SCAN_THRESHOLD=35           # signal-strength ...
-        # yields the value "35           # signal-strength ..." and `scan` crashes on int().
-        # Remove @expectedFailure once load_config() strips inline comments.
+    def test_uncommented_example_lines_load_as_documented(self):
+        # Uncommenting a line of the example (inline comment and all) must not change it.
         with tempfile.TemporaryDirectory() as tmp:
             conf = os.path.join(tmp, "ntsc-tvh.conf")
             with open(conf, "w") as fh:

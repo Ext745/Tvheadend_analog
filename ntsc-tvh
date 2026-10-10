@@ -80,6 +80,7 @@ def load_config():
                         continue
                     k, v = line.split("=", 1)
                     k = k.strip()
+                    v = re.sub(r"\s+#.*$", "", v)   # inline "  # comment" (a '#' inside a value is kept)
                     v = v.strip().strip('"').strip("'")
                     if k in cfg:
                         cfg[k] = v
@@ -428,17 +429,28 @@ def cmd_stream(cfg, args):
 def video_variance(cfg, info, frames=6):
     """Grab a few gray frames and return the max per-frame luma std-dev.
     Flat 'no signal' (forced blue/black) screens -> ~0; real pictures -> high."""
+    # Same input path as `stream`: on some ffmpeg builds the MPEG node read directly
+    # is empty, which would make every channel look like a flat screen.
+    via_cat = info["hw_encoder"] and cfg["CAPTURE_VIA_CAT"] == "1"
     if info["hw_encoder"]:
-        src = ["-f", "mpeg", "-i", cfg["DEVICE"]]
+        src = ["-f", "mpeg", "-i", "pipe:0" if via_cat else cfg["DEVICE"]]
     else:
         src = ["-f", "v4l2", "-i", cfg["DEVICE"]]
     cmd = [cfg["FFMPEG"], "-hide_banner", "-loglevel", "error", *src,
            "-an", "-vf", "fps=2,scale=160:120,format=gray",
            "-frames:v", str(frames), "-f", "rawvideo", "pipe:1"]
+    cat = subprocess.Popen(["cat", cfg["DEVICE"]], stdout=subprocess.PIPE) if via_cat else None
     try:
-        r = subprocess.run(cmd, capture_output=True, timeout=8)
+        r = subprocess.run(cmd, stdin=cat.stdout if cat else None,
+                           capture_output=True, timeout=8)
     except subprocess.TimeoutExpired:
         return 0.0
+    finally:
+        if cat:
+            # cat never sees EOF on a capture node; stop it once ffmpeg has its frames.
+            cat.kill()
+            cat.wait()
+            cat.stdout.close()
     data = r.stdout
     fsize = 160 * 120
     best = 0.0
@@ -623,6 +635,9 @@ def cmd_signal(cfg, args):
     chan = parse_channel(args.channel)
     with TunerLock(cfg["LOCK_FILE"], wait=float(args.wait or 0)):
         tune(cfg, chan)
+        if chan["kind"] != "tuner":
+            print(f"{chan['id']}: selected; line inputs have no RF signal to measure")
+            return
         time.sleep(float(cfg["SCAN_DWELL"]))
         sig, afc = get_signal(cfg)
     if sig is None:
