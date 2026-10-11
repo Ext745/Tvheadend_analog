@@ -26,9 +26,21 @@ class BuildFfmpegCmd(unittest.TestCase):
     def test_hw_via_cat_reads_stdin(self):
         self.assertEqual(ntsc.build_ffmpeg_cmd(make_cfg(), HW), [
             "ffmpeg", "-hide_banner", "-loglevel", "error",
-            "-fflags", "+genpts", "-f", "mpeg", "-i", "pipe:0",
+            "-fflags", "+genpts", "-f", "mpeg",
+            "-analyzeduration", "1000000", "-probesize", "500000", "-i", "pipe:0",
             "-c:v", "copy", "-c:a", "copy",
             "-f", "mpegts", "-mpegts_flags", "+resend_headers", "pipe:1"])
+
+    def test_hw_probe_limits_configurable(self):
+        def probe(**kw):
+            cmd = ntsc.build_ffmpeg_cmd(make_cfg(**kw), HW)
+            return cmd[cmd.index("mpeg") + 1:cmd.index("-i")]
+        self.assertEqual(probe(PROBE_SECONDS="0.5", PROBE_SIZE="1000000"),
+                         ["-analyzeduration", "500000", "-probesize", "1000000"])
+        self.assertEqual(probe(PROBE_SECONDS="", PROBE_SIZE=""), [])   # ffmpeg defaults
+
+    def test_raw_has_no_probe_limits(self):
+        self.assertNotIn("-analyzeduration", ntsc.build_ffmpeg_cmd(make_cfg(), RAW))
 
     def test_hw_direct_reads_device(self):
         cmd = ntsc.build_ffmpeg_cmd(make_cfg(CAPTURE_VIA_CAT="0", DEVICE="/dev/video2"), HW)

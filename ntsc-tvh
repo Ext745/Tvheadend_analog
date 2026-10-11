@@ -60,6 +60,11 @@ DEFAULTS = {
                                       #   ffmpeg builds, letting ffmpeg open the MPEG node directly
                                       #   yields an empty stream; feeding it via cat is reliable.
                                       #   Set 0 only if your build reads the node directly just fine.
+    "PROBE_SECONDS": "1",             # HW-MPEG input: how much stream ffmpeg analyses before it
+    "PROBE_SIZE":    "500000",        #   starts writing (seconds / bytes; "" = ffmpeg's default,
+                                      #   ~5 s). The card's PS has its sequence header + MP2 audio
+                                      #   within ~0.2 s, so 1 s / 500 KB finds both and cuts
+                                      #   stream start-up (and each video-scan probe) by ~4 s.
     "STOP_GRACE":    "1",             # seconds ffmpeg gets to exit after SIGTERM before SIGKILL.
                                       #   Some ffmpeg builds never exit on SIGTERM with an ALSA input.
     # scanning --------------------------------------------------------------- #
@@ -361,6 +366,16 @@ class TunerLock:
 # --------------------------------------------------------------------------- #
 #  Streaming  (this is what TVHeadend's pipe:// mux invokes)
 # --------------------------------------------------------------------------- #
+def hw_probe_args(cfg):
+    """ffmpeg input options bounding how much of the HW-MPEG stream is analysed up front."""
+    args = []
+    if cfg["PROBE_SECONDS"]:
+        args += ["-analyzeduration", str(int(float(cfg["PROBE_SECONDS"]) * 1_000_000))]
+    if cfg["PROBE_SIZE"]:
+        args += ["-probesize", str(int(cfg["PROBE_SIZE"]))]
+    return args
+
+
 def build_ffmpeg_cmd(cfg, info):
     """Return the ffmpeg argv that writes MPEG-TS to stdout."""
     ff = cfg["FFMPEG"]
@@ -374,7 +389,7 @@ def build_ffmpeg_cmd(cfg, info):
     if info["hw_encoder"]:
         # Device already emits an MPEG-2 program stream; just demux + remux to TS.
         base = [ff, "-hide_banner", "-loglevel", "error",
-                "-fflags", "+genpts", "-f", "mpeg", "-i", cfg["DEVICE"],
+                "-fflags", "+genpts", "-f", "mpeg", *hw_probe_args(cfg), "-i", cfg["DEVICE"],
                 "-c:v", "copy", *aargs,
                 "-f", "mpegts", "-mpegts_flags", "+resend_headers", "pipe:1"]
         if cfg["CAPTURE_VIA_CAT"] == "1":
@@ -647,7 +662,7 @@ def capture_gray(cfg, info, frames=6):
     # is empty, which would make every channel look like a flat screen.
     via_cat = info["hw_encoder"] and cfg["CAPTURE_VIA_CAT"] == "1"
     if info["hw_encoder"]:
-        src = ["-f", "mpeg", "-i", "pipe:0" if via_cat else cfg["DEVICE"]]
+        src = ["-f", "mpeg", *hw_probe_args(cfg), "-i", "pipe:0" if via_cat else cfg["DEVICE"]]
     else:
         src = ["-f", "v4l2", "-i", cfg["DEVICE"]]
     cmd = [cfg["FFMPEG"], "-hide_banner", "-loglevel", "error", *src,

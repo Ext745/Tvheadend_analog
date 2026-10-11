@@ -682,6 +682,7 @@ a `# comment` after whitespace is ignored. The most useful:
 | `VIDEO_BITRATE`        | *(driver default)*               | pin HW MPEG-2 bitrate, e.g. `6000000`     |
 | `CAPTURE_VIA_CAT`      | `1`                              | `1` = `cat dev \| ffmpeg` (reliable read; stream + video scan) |
 | `STOP_GRACE`           | `1`                              | seconds ffmpeg gets after SIGTERM before SIGKILL |
+| `PROBE_SECONDS` / `PROBE_SIZE` | `1` / `500000`           | HW-MPEG: stream ffmpeg analyses before output (blank = ffmpeg's ~5 s) |
 | `RAW_ASPECT`           | `4:3`                            | display aspect of raw-card video (`16:9` for anamorphic) |
 | `SCAN_VAR_MIN`         | `12`                             | video scan: min contrast (rejects flat screens) |
 | `SCAN_NOISE_MAX`       | `0.60`                           | video scan: max spatial noise of a picture |
@@ -917,6 +918,11 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
   printed when stderr is a terminal. TVHeadend logs every stderr line from a pipe
   at ERROR level, so each channel start used to show up as an error. Real errors
   from ntsc-tvh and ffmpeg are still logged.
+- **Channels start ~4 s faster on hardware-MPEG cards.** ffmpeg analysed ~5 s of the
+  HVR-1950's program stream before writing anything, so every channel change (and every
+  `video`-method scan probe) waited ~6.5 s. It now analyses at most 1 s / 500 KB
+  (`PROBE_SECONDS`, `PROBE_SIZE`): first byte in ~1.1 s on the HVR-1950, with the same
+  MPEG-2 720×480 4:3 + MP2 streams detected.
 
 ---
 

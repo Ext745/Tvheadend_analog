@@ -54,7 +54,8 @@ class CaptureGray(unittest.TestCase):
         self.capture()
         self.popen.assert_called_once_with(["cat", "/dev/video0"], stdout=subprocess.PIPE,
                                            preexec_fn=ntsc._die_with_parent)
-        self.assertEqual(self.cmd[4:8], ["-f", "mpeg", "-i", "pipe:0"])
+        self.assertEqual(self.cmd[4:12], ["-f", "mpeg", "-analyzeduration", "1000000",
+                                          "-probesize", "500000", "-i", "pipe:0"])
         self.assertIs(self.stdin, self.cat.stdout)
         self.cat.kill.assert_called_once_with()
         self.cat.wait.assert_called_once_with()
@@ -63,7 +64,8 @@ class CaptureGray(unittest.TestCase):
     def test_hw_direct_read_when_cat_disabled(self):
         self.capture(CAPTURE_VIA_CAT="0")
         self.popen.assert_not_called()
-        self.assertEqual(self.cmd[4:8], ["-f", "mpeg", "-i", "/dev/video0"])
+        self.assertEqual(self.cmd[4:12], ["-f", "mpeg", "-analyzeduration", "1000000",
+                                          "-probesize", "500000", "-i", "/dev/video0"])
         self.assertIsNone(self.stdin)
 
     def test_raw_device_reads_v4l2_directly(self):
