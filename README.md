@@ -110,10 +110,13 @@ HVR-1950 behaviour seen in testing (kernel 7.0):
 - It powers up in **PAL** 720×576. `tune` switches it to NTSC 720×480.
 - It delivers ALSA **audio only while video is streaming**. `arecord` on its own
   gets an I/O error.
-- With no signal it shows **snow** rather than a blank screen, and the xc3028
-  reports **0 %** signal on every channel unless it locks onto an analog
-  carrier, even on a real picture. The default `SCAN_METHOD=auto` handles that
-  (see §7); `signal` finds nothing on this card.
+- With no signal it shows **snow** rather than a blank screen.
+- It reports signal **only while capturing**. Idle, `v4l2-ctl --get-tuner` reads
+  **0 %** on every channel, even one with a perfect picture; about 1.6 s into a
+  capture the same channel reads 44 % (an RF modulator on us-bcast:4) and
+  `--get-detected-standard` shows NTSC. So ntsc-tvh reads raw cards' signal during a
+  short capture (`signal`, `scan`, `analog-check`), which takes ~3 s on an empty
+  channel. Holding the device open without capturing isn't enough.
 - Without `xc3028-v27.fw` the tuner silently stays at 0 MHz (see §11). The
   kernel's `extract_xc3028.pl` names a download that no longer exists:
   `steventoth.net` now serves an unrelated site. A prebuilt copy is in LibreELEC's
@@ -608,8 +611,9 @@ Analog "is this channel live?" is inherently fuzzy. Four strategies:
 
 - **`auto`** (default) — the `video` test below, sped up on cards that report
   signal: once any channel has read above 0 %, channels reading exactly 0 % are
-  skipped without grabbing frames. Cards that never report signal (the 800e) get
-  the full picture check on every channel; weak channels (a few %) are still
+  skipped without grabbing frames. Cards that don't report signal idle (the 800e,
+  which only reports while capturing) get the full picture check on every channel,
+  and their scan output shows the capture-time reading; weak channels (a few %) are still
   checked. On the HVR-1950 with one live channel in us-bcast it found the same
   channel as `signal` and `video`.
 - **`signal`** — reads the tuner's signal-strength % via
@@ -654,8 +658,9 @@ Analog "is this channel live?" is inherently fuzzy. Four strategies:
 
 Recommendation: keep `auto`. Use `signal` only for the fastest walk on a card whose
 signal figure you trust, with a threshold calibrated against two or three channels
-you *know* are live (`ntsc-tvh signal us-cable:23`); on the 800e the figure stays at
-0 % even on a real picture, so `signal` finds nothing there. There is no magic here — it's a heuristic, and
+you *know* are live (`ntsc-tvh signal us-cable:23`). On a raw card like the 800e
+every `signal` reading needs a short capture, so `signal` is no faster than `auto`
+there. There is no magic here — it's a heuristic, and
 the tool is explicit about that rather than pretending otherwise.
 
 ---
@@ -878,9 +883,10 @@ ship. `dmesg` shows `Could not load firmware xc3028-v27.fw`. Composite and S-Vid
 still work without it. `scan` aborts on this error and keeps the previous
 state/M3U, so it never saves an empty channel list.
 
-**`signal` always reads 0%.** Some driver/tuner combos don't populate the field
-(the 800e's xc3028 + tvp5150 among them). Use `SCAN_METHOD=auto` (the default) or
-`video`, which judge the picture.
+**`signal` always reads 0%.** Some driver/tuner combos don't populate the field.
+Raw-frame cards whose decoder only reports while capturing (the 800e) are handled:
+ntsc-tvh reads their signal during a short capture. For the rest, use
+`SCAN_METHOD=auto` (the default) or `video`, which judge the picture.
 
 **No audio / wrong audio.** On the HVR-1950 audio is baked into the MPEG-2 PS;
 `AUDIO_CODEC=copy` is correct. Switch to `ac3` only if a downstream player
@@ -1050,8 +1056,13 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
 - **More than one card (`--card NAME`).** A second tuner gets its own config file,
   state, playlist, tuner lock, timer and TVHeadend network, so both cards can stream
   at once (§10). Setups with one card are unchanged, URLs included.
-- **New default scan method `auto`.** `signal` (the old default) finds nothing on
-  cards that always read 0 %, like the 800e; `video` is right everywhere but grabs
+- **The 800e reports signal.** Its decoder only reports a lock while capturing, so
+  idle readings were always 0 %, even on a perfect picture. Raw cards' signal is now
+  read during a short capture: 44 % on a test pattern, 0 % on empty channels.
+  `auto` still decides "skip 0 % channels" from idle readings only, so it can't skip
+  real channels on such a card.
+- **New default scan method `auto`.** `signal` (the old default) found nothing on
+  cards that read 0 % idle, like the 800e; `video` is right everywhere but grabs
   frames on every channel. `auto` judges the picture like `video` and skips the frame
   grab on 0 % channels once the card has shown it reports signal.
 - **Stream profiles start ~4 s sooner.** Each spawn profile's ffmpeg analysed ~5 s of

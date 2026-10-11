@@ -155,7 +155,7 @@ def check_device(n, cfg, rep):
     return info
 
 
-def check_tuning(n, cfg, chan, rep, out):
+def check_tuning(n, cfg, info, chan, rep, out):
     try:
         n.tune(cfg, chan)               # selects input + standard; RF: verifies the read-back
     except n.ChannelError as exc:
@@ -168,9 +168,8 @@ def check_tuning(n, cfg, chan, rep, out):
     path = os.path.join(out, f"get-tuner-{safe(chan['id'])}.txt")
     with open(path, "w") as fh:
         fh.write(raw)
-    sig, afc = n.get_signal(cfg)
-    note = ("" if sig else
-            " (some tuners, e.g. the 800e's xc3028, report 0 % even on a real picture)")
+    sig, afc = n.get_signal_live(cfg, info)     # raw cards: read during a short capture
+    note = "" if sig else " (no carrier on this channel, or the tuner doesn't report signal)"
     rep.add("tune", chan["id"], True, f"{chan['freq']:.3f} MHz read back; signal {sig} %{note}",
             signal=sig, afc=afc, get_tuner=path)
     return True
@@ -188,7 +187,7 @@ def fmt_metrics(m):
 
 
 def check_picture(n, cfg, info, chan, want, rep, out):
-    tuned = check_tuning(n, cfg, chan, rep, out) if want else _quiet_tune(n, cfg, chan, rep)
+    tuned = check_tuning(n, cfg, info, chan, rep, out) if want else _quiet_tune(n, cfg, chan, rep)
     if not tuned:
         return
     time.sleep(float(cfg["SCAN_DWELL"]))
