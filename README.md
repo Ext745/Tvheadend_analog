@@ -979,14 +979,13 @@ SIGKILL with nothing left holding the tuner, scan → state → M3U, and the exa
 `pipe://` URL format. CI
 (`.github/workflows/test.yml`) runs them on Python 3.10–3.14 on every push.
 
-The `*-800e.txt` fixtures were captured from a real Pinnacle 800e (em28xx). The
-HVR-1950 ones are modelled on `v4l2-ctl` output, not captured from the real box. To
-pin them to the real hardware, capture these on the HVR-1950's host and replace the
-matching `tests/fixtures/*.txt` files:
+The `*-800e.txt` fixtures were captured from a real Pinnacle 800e (em28xx), and
+the HVR-1950 ones (`v4l2-all-hvr1950.txt`, `v4l2-list-inputs-hvr1950.txt`,
+`v4l2-get-tuner-nosignal.txt`) from the real card (kernel 7.0, tuned to us-bcast:7
+with no analog carrier). Only `v4l2-get-tuner-locked.txt` is still modelled: it
+needs the tuner locked on a live analog channel. Once one is available, replace it:
 
 ```bash
-v4l2-ctl -d /dev/video0 --all          > v4l2-all-hvr1950.txt
-v4l2-ctl -d /dev/video0 --list-inputs  > v4l2-list-inputs-hvr1950.txt
 v4l2-ctl -d /dev/video0 --get-tuner    > v4l2-get-tuner-locked.txt   # tuned to a live channel
 ```
 

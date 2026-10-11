@@ -4,29 +4,24 @@ ioctl: VIDIOC_ENUMINPUT
 	Type        : 0x00000001 (Tuner)
 	Audioset    : 0x00000000
 	Tuner       : 0x00000000
-	Standard    : 0x000000000000B000 ( NTSC )
-	Status      : ok
+	Standard    : 0x0000000000000000 ()
+	Status      : 0x00000000 (ok)
+	Capabilities: 0x00000000 (not defined)
 
 	Input       : 1
-	Name        : radio
-	Type        : 0x00000001 (Tuner)
+	Name        : composite
+	Type        : 0x00000002 (Camera)
 	Audioset    : 0x00000000
-	Tuner       : 0x00000001
-	Standard    : 0x000000000000B000 ( NTSC )
-	Status      : ok
+	Tuner       : 0x00000000
+	Standard    : 0x0000000000000000 ()
+	Status      : 0x00000000 (ok)
+	Capabilities: 0x00000000 (not defined)
 
 	Input       : 2
 	Name        : s-video
 	Type        : 0x00000002 (Camera)
 	Audioset    : 0x00000000
 	Tuner       : 0x00000000
-	Standard    : 0x000000000000B000 ( NTSC )
-	Status      : ok
-
-	Input       : 3
-	Name        : composite
-	Type        : 0x00000002 (Camera)
-	Audioset    : 0x00000000
-	Tuner       : 0x00000000
-	Standard    : 0x000000000000B000 ( NTSC )
-	Status      : ok
+	Standard    : 0x0000000000000000 ()
+	Status      : 0x00000000 (ok)
+	Capabilities: 0x00000000 (not defined)

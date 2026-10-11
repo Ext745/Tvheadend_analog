@@ -28,8 +28,8 @@ class DeviceInfo(DeviceTestCase):
         self.assertEqual(info["card"], "WinTV HVR-1950 Model 751xx")
         self.assertEqual(info["pixfmt"], "MPEG")
         self.assertTrue(info["hw_encoder"])
-        self.assertEqual(info["inputs"], [(0, "television"), (1, "radio"),
-                                          (2, "s-video"), (3, "composite")])
+        # Captured from the real card (kernel 7.0): three inputs, no radio input.
+        self.assertEqual(info["inputs"], [(0, "television"), (1, "composite"), (2, "s-video")])
 
     def test_pinnacle_800e_is_raw(self):
         # Captured from a real 800e (em28xx card=17); it powers up in PAL 720x576.
@@ -63,8 +63,8 @@ class Inputs(DeviceTestCase):
         self.use(FakeV4L2())
         cfg = make_cfg()
         self.assertEqual(ntsc.resolve_input_index(cfg, "television"), 0)
+        self.assertEqual(ntsc.resolve_input_index(cfg, "composite"), 1)
         self.assertEqual(ntsc.resolve_input_index(cfg, "svideo"), 2)
-        self.assertEqual(ntsc.resolve_input_index(cfg, "composite"), 3)
 
     def test_resolve_800e(self):
         self.use(FakeV4L2(inputs_fixture="v4l2-list-inputs-800e.txt"))
@@ -130,7 +130,7 @@ class Tune(DeviceTestCase):
     def test_line_input_does_not_set_frequency(self):
         fake = self.use(FakeV4L2())
         ntsc.tune(make_cfg(), ntsc.parse_channel("input:composite"))
-        self.assertIn("--set-input=3", fake.opts())
+        self.assertIn("--set-input=1", fake.opts())
         self.assertFalse(any(o.startswith("--set-freq") for o in fake.opts()))
 
     def test_tuner_that_does_not_move_raises(self):
@@ -198,7 +198,7 @@ class CmdSignal(DeviceTestCase):
         fake = self.use(FakeV4L2())
         self.assertEqual(self.signal("input:composite"),
                          "input:composite: selected; line inputs have no RF signal to measure\n")
-        self.assertIn("--set-input=3", fake.opts())
+        self.assertIn("--set-input=1", fake.opts())
         self.assertNotIn("--get-tuner", fake.opts())
 
 

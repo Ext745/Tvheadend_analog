@@ -1,9 +1,9 @@
 Driver Info:
 	Driver name      : pvrusb2
 	Card type        : WinTV HVR-1950 Model 751xx
-	Bus info         : usb-0000:00:1d.0-1.2
-	Driver version   : 6.8.12
-	Capabilities     : 0x85250011
+	Bus info         : usb-0000:00:14.0-5.4
+	Driver version   : 7.0.14
+	Capabilities     : 0x81270001
 		Video Capture
 		Tuner
 		Audio
@@ -11,15 +11,53 @@ Driver Info:
 		Read/Write
 		Extended Pix Format
 		Device Capabilities
+	Device Caps      : 0x01230001
+		Video Capture
+		Tuner
+		Audio
+		Read/Write
+		Extended Pix Format
 Priority: 2
+Frequency for tuner 0: 2804 (175.250000 MHz)
+Tuner 0:
+	Name                 : 
+	Type                 : Analog TV
+	Capabilities         : 62.5 kHz multi-standard stereo lang1 lang2 freq-bands 
+	Frequency range      : 44.000 MHz - 958.000 MHz
+	Signal strength/AFC  : 0%/0
+	Current audio mode   : stereo
+	Available subchannels: mono 
 Video input : 0 (television: ok)
 Audio input : 0 (PVRUSB2 Audio)
-Frequency for tuner 0: 1072 (67.000000 MHz)
 Video Standard = 0x0000b000
 	NTSC-M/M-JP/M-KR
 Format Video Capture:
 	Width/Height      : 720/480
-	Pixel Format      : 'MPEG' (MPEG-1/2/4 Multiplexed)
+	Pixel Format      : 'MPEG' (MPEG-1/2/4)
 	Field             : Interlaced
 	Bytes per Line    : 0
 	Size Image        : 32768
+	Colorspace        : Default
+	Transfer Function : Default (maps to Rec. 709)
+	YCbCr/HSV Encoding: Default (maps to ITU-R 601)
+	Quantization      : Default (maps to Full Range)
+	Flags             : 
+Crop Capability Video Capture:
+	Bounds      : Left 0, Top 0, Width 0, Height 0
+	Default     : Left 0, Top 0, Width 0, Height 0
+	Pixel Aspect: 0/0
+Selection Video Capture: crop, Left 0, Top 0, Width 720, Height 480, Flags: 
+Selection Video Capture: crop_default, Left 0, Top 0, Width 0, Height 0, Flags: 
+Selection Video Capture: crop_bounds, Left 0, Top 0, Width 0, Height 0, Flags: 
+Streaming Parameters Video Capture:
+	Frames per second: 29.970 (30000/1001)
+	Read buffers     : 2
+                     brightness 0x00980900 (int)    : min=0 max=255 step=1 default=128 value=128
+                       contrast 0x00980901 (int)    : min=0 max=127 step=1 default=68 value=68
+                     saturation 0x00980902 (int)    : min=0 max=127 step=1 default=64 value=64
+                            hue 0x00980903 (int)    : min=-128 max=127 step=1 default=0 value=0
+                         volume 0x00980905 (int)    : min=0 max=65535 step=1 default=62000 value=62000
+                        balance 0x00980906 (int)    : min=-32768 max=32767 step=1 default=0 value=0
+                           bass 0x00980907 (int)    : min=-32768 max=32767 step=1 default=0 value=0
+                         treble 0x00980908 (int)    : min=-32768 max=32767 step=1 default=0 value=0
+                           mute 0x00980909 (bool)   : default=0 value=0

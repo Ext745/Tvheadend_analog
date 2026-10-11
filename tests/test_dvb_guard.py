@@ -139,7 +139,7 @@ class DvbGuard(unittest.TestCase):
                 ntsc.tune(self.cfg, ntsc.parse_channel("us-bcast:7"))
             self.assertEqual(fake.calls, [])
             ntsc.tune(self.cfg, ntsc.parse_channel("input:composite"))   # idle FE: fine
-        self.assertIn("--set-input=3", fake.opts())
+        self.assertIn("--set-input=1", fake.opts())
 
     def no_device_access(self):
         """Patch everything that would open the analog node; fail the test if it is used."""
