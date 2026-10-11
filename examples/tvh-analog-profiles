@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+# tvh-analog-profiles - create TVHeadend stream (+ codec) profiles tuned for analog (ntsc-tvh)
+#
+# Analog channels from ntsc-tvh arrive as 720x480 4:3 MPEG-2 with MP2 audio: interlaced
+# from a hardware encoder (HVR-1950), already deinterlaced from the raw path (800e).
+# Kodi (HTSP) and VLC play that as-is; browsers and many phones/IPTV apps don't. These
+# profiles transcode to H.264/AAC (and, on fast enough machines, H.265, AV1 and an
+# upscaled 59.94p H.264), deinterlacing only frames that are actually interlaced and
+# keeping the 4:3 shape. TVHeadend's stock "webtv" profiles scale to 384 lines and
+# don't deinterlace.
+#
+#   tvh-analog-profiles [--url http://host:9981] [--user U --password P] [--dry-run]
+#                       [--min-speed 2.0 | --all]
+#   tvh-analog-profiles --remove            # delete the profiles again
+#
+# Run it where TVHeadend's ffmpeg runs -- e.g. `docker exec tvheadend tvh-analog-profiles`
+# -- so the speed test for the heavier profiles measures the machine that will encode.
+# Creates the profiles, or updates them in place if one with the same name exists.
+# Standard library only.
+#
+# Most profiles are "spawn" profiles: TVHeadend pipes the channel through ffmpeg (the
+# container already has it for ntsc-tvh). TVHeadend's own libav MPEG-TS muxer is broken
+# in current linuxserver/tvheadend builds ('Unable to parse option value "nit"'; the
+# stock webtv-h264-aac-mpegts profile fails the same way), and spawn also gives access
+# to encoders TVHeadend's transcoder doesn't offer (SVT-AV1).
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+# Codec profiles, for the Matroska profile, which uses TVHeadend's built-in transcoder.
+# The first field is the encoder name, which codec_profile/create takes as its "class".
+CODECS = [
+    ("libx264", {
+        "name": "analog-h264",
+        "description": "Analog SD to H.264: deinterlace interlaced frames only, keep 480 lines",
+        "height": 0,                    # keep 480 lines (stock webtv scales to 384)
+        "deinterlace": True,
+        "deinterlace_enable_auto": 1,   # only interlaced frames: HVR-1950 yes, 800e (already
+                                        #   deinterlaced by ntsc-tvh) passes through untouched
+        "deinterlace_field_rate": 0,    # 29.97p
+        "profile": -99,                 # auto (x264 picks High); this TVHeadend passes a
+                                        #   numeric profile that libx264 rejects ("invalid profile")
+        "pix_fmt": 0,                   # yuv420p: what every player decodes
+        "preset": "veryfast",
+        "crf": 22,
+        "bit_rate": 0,
+        "gop_size": 60,                 # keyframe every 2 s: quick start and seeking
+    }),
+    ("aac", {
+        "name": "analog-aac",
+        "description": "Analog audio to AAC-LC stereo 160 kb/s",
+        "profile": 1,                   # LC
+        "tracks": 1,
+        "sample_rate": 48000,
+        "channel_layout": 3,            # stereo
+        "bit_rate": 160,
+    }),
+]
+
+TRANSCODE = [
+    {
+        "name": "analog-h264-aac-matroska",
+        "comment": "Analog: H.264/AAC in Matroska (web browser player)",
+        "container": 1,                 # Matroska/built-in
+        "pro_vcodec": "analog-h264", "pro_acodec": "analog-aac",
+        # Saving a node via the API resets list fields that are left out, so name them.
+        "pro_scodec": "", "src_vcodec": [], "src_acodec": [], "src_scodec": [],
+    },
+]
+
+# Spawn profiles. bwdif with deint=1 deinterlaces only frames flagged interlaced; the
+# encoders keep the 8:9 pixel shape, so the picture stays 4:3 unless a profile rescales
+# it to square pixels. "gated" profiles are only created if this machine encodes them at
+# --min-speed times real time or better.
+AAC = "-c:a aac -ac 2 -ar 48000 -b:a {}k"
+X264 = "-c:v libx264 -preset veryfast -pix_fmt yuv420p"
+SPAWN = [
+    {"name": "analog-h264-aac-mpegts", "gated": False, "mime": "video/mp2t", "fmt": "mpegts",
+     "comment": "Analog: H.264/AAC in MPEG-TS (IPTV apps, VLC, smart TVs)",
+     "vf": "bwdif=0:-1:1", "venc": f"{X264} -crf 22 -g 60", "aenc": AAC.format(160)},
+    {"name": "analog-mobile", "gated": False, "mime": "video/mp2t", "fmt": "mpegts",
+     "comment": "Analog: 360-line H.264/AAC in MPEG-TS, ~1 Mb/s (phones, remote viewing)",
+     "vf": "bwdif=0:-1:1,scale=-2:360",
+     "venc": f"{X264} -b:v 900k -maxrate 1200k -bufsize 1800k -g 60", "aenc": AAC.format(96)},
+    {"name": "analog-h265-aac-mpegts", "gated": True, "mime": "video/mp2t", "fmt": "mpegts",
+     "comment": "Analog: H.265/AAC in MPEG-TS (Kodi, VLC, newer TVs; about half the H.264 bitrate)",
+     "vf": "bwdif=0:-1:1",
+     "venc": "-c:v libx265 -preset veryfast -crf 24 -g 60 -pix_fmt yuv420p -x265-params log-level=error",
+     "aenc": AAC.format(160)},
+    {"name": "analog-av1-opus-webm", "gated": True, "mime": "video/webm", "fmt": "webm",
+     "comment": "Analog: AV1/Opus in WebM (Chrome, Firefox, newer phones and TVs)",
+     "vf": "bwdif=0:-1:1", "venc": "-c:v libsvtav1 -preset 10 -crf 35 -g 60 -pix_fmt yuv420p",
+     "aenc": "-c:a libopus -ac 2 -b:a 128k"},
+    # Upscaling adds no detail. What this profile buys is field-rate deinterlacing: one
+    # frame per field, 59.94 frames/s, for smoother motion -- delivered at a size most
+    # clients won't rescale again.
+    {"name": "analog-h264-720p60", "gated": True, "mime": "video/mp2t", "fmt": "mpegts",
+     "comment": "Analog: deinterlaced to 59.94p, upscaled to 960x720 H.264/AAC (MPEG-TS)",
+     "vf": "bwdif=1:-1:1,scale=960:720:flags=lanczos,setsar=1",
+     "venc": f"{X264} -crf 21 -g 120", "aenc": AAC.format(160)},
+]
+FFMPEG_IN = "ffmpeg -hide_banner -loglevel error -fflags +genpts -i pipe:0 -map 0:v:0 -map 0:a:0?"
+
+
+def spawn_cmdline(p):
+    cmd = f"{FFMPEG_IN} -vf {p['vf']} {p['venc']} {p['aenc']} -f {p['fmt']} pipe:1"
+    # SVT-AV1 prints a banner on stderr, which TVHeadend logs as errors. TVHeadend runs
+    # the command without a shell, so set its log level through env.
+    return f"env SVT_LOG=1 {cmd}" if "libsvtav1" in p["venc"] else cmd
+
+
+def bench(p, seconds=4):
+    """Real-time factor of a profile's video encode on this machine, or None if ffmpeg
+    or the encoder isn't available here. Synthetic 720x480 source with light noise, and
+    the deinterlacer runs on every frame (deint=0): calibrated against a real 480i
+    capture this reads 0.7-0.8x of the real speed, i.e. errs on the slow side."""
+    src = "testsrc2=size=720x480:rate=30000/1001,noise=alls=2:allf=t,setsar=8/9"
+    cmd = (["ffmpeg", "-hide_banner", "-nostdin", "-f", "lavfi", "-i", src,
+            "-t", str(seconds), "-vf", p["vf"].replace(":-1:1", ":-1:0")]
+           + p["venc"].split() + ["-an", "-f", "null", "-"])
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180,
+                           env=dict(os.environ, SVT_LOG="1"))
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    speeds = re.findall(r"speed=\s*([\d.]+)x", r.stderr)
+    return float(speeds[-1]) if r.returncode == 0 and speeds else None
+
+
+class Tvh:
+    def __init__(self, url, user=None, password=None, dry_run=False):
+        self.url = url.rstrip("/") + "/"
+        self.dry_run = dry_run
+        handlers = []
+        if user:
+            mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+            mgr.add_password(None, self.url, user, password or "")
+            handlers += [urllib.request.HTTPDigestAuthHandler(mgr),
+                         urllib.request.HTTPBasicAuthHandler(mgr)]
+        self.opener = urllib.request.build_opener(*handlers)
+
+    def call(self, path, **form):
+        data = urllib.parse.urlencode(
+            {k: json.dumps(v) if isinstance(v, (dict, list)) else v for k, v in form.items()}
+        ).encode()
+        try:
+            with self.opener.open(self.url + "api/" + path, data=data, timeout=30) as r:
+                body = r.read()
+        except urllib.error.HTTPError as exc:
+            hint = " (wrong or missing --user/--password?)" if exc.code in (401, 403) else ""
+            sys.exit(f"error: {path}: HTTP {exc.code}{hint}")
+        except urllib.error.URLError as exc:
+            sys.exit(f"error: cannot reach {self.url}: {exc.reason}")
+        return json.loads(body) if body.strip() else {}
+
+    def existing(self, kind):
+        """{name: uuid} of the codec profiles or stream profiles."""
+        if kind == "codec":
+            uuids = [e["uuid"] for e in self.call("codec_profile/list").get("entries", [])]
+        else:
+            uuids = [e["key"] for e in self.call("profile/list").get("entries", [])]
+        out = {}
+        for uuid in uuids:
+            node = self.call("idnode/load", uuid=uuid)["entries"][0]
+            name = next((p["value"] for p in node["params"] if p["id"] == "name"), None)
+            out[name] = uuid
+        return out
+
+    def apply(self, kind, cls, conf, have):
+        name = conf["name"]
+        if name in have:
+            action = "update"
+            if not self.dry_run:
+                self.call("idnode/save", node=dict(conf, uuid=have[name]))
+        else:
+            action = "create"
+            if not self.dry_run:
+                create = "codec_profile/create" if kind == "codec" else "profile/create"
+                self.call(create, **{"class": cls, "conf": conf})
+        print(f"{'would ' if self.dry_run else ''}{action:<6} {kind} profile {name}")
+
+    def remove(self, kind, names, have):
+        for name in names:
+            if name in have:
+                if not self.dry_run:
+                    self.call("idnode/delete", uuid=have[name])
+                print(f"{'would ' if self.dry_run else ''}delete {kind} profile {name}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Create TVHeadend stream/codec profiles for analog channels")
+    ap.add_argument("--url", default="http://localhost:9981", help="TVHeadend web URL")
+    ap.add_argument("--user", help="TVHeadend admin user (if authentication is on)")
+    ap.add_argument("--password", help="password for --user")
+    ap.add_argument("--dry-run", action="store_true", help="show what would change")
+    ap.add_argument("--remove", action="store_true", help="delete these profiles instead")
+    ap.add_argument("--min-speed", type=float, default=2.0,
+                    help="create the H.265 / AV1 / 720p60 profiles only if a test encode on "
+                         "this machine runs at least this many times real time (default 2.0)")
+    ap.add_argument("--all", action="store_true", help="create every profile, skip the speed test")
+    args = ap.parse_args()
+    tvh = Tvh(args.url, args.user, args.password, args.dry_run)
+    if args.remove:
+        # stream profiles first: they reference the codec profiles
+        names = [p["name"] for p in TRANSCODE + SPAWN]
+        tvh.remove("stream", names, tvh.existing("stream"))
+        tvh.remove("codec", [c["name"] for _, c in CODECS], tvh.existing("codec"))
+        return
+    have = tvh.existing("codec")
+    for cls, conf in CODECS:
+        tvh.apply("codec", cls, conf, have)
+    have = tvh.existing("stream")
+    for conf in TRANSCODE:
+        tvh.apply("stream", "profile-transcode", dict(conf, enabled=True), have)
+    for p in SPAWN:
+        if p["gated"] and not args.all:
+            speed = bench(p)
+            if speed is None:
+                print(f"skip   stream profile {p['name']}: no ffmpeg/encoder here to test it "
+                      "(run inside the TVHeadend container, or pass --all)")
+                continue
+            if speed < args.min_speed:
+                print(f"skip   stream profile {p['name']}: {speed:.1f}x real time "
+                      f"(needs {args.min_speed}x)")
+                continue
+            print(f"       {p['name']}: {speed:.1f}x real time")
+        conf = {"name": p["name"], "comment": p["comment"], "mime": p["mime"],
+                "enabled": True, "cmdline": spawn_cmdline(p)}
+        tvh.apply("stream", "profile-mpegts-spawn", conf, have)
+
+
+if __name__ == "__main__":
+    main()

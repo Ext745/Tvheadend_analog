@@ -330,6 +330,79 @@ zero auto-network churn — good for a small, fixed lineup.
 
 ---
 
+## 6b. Stream profiles for analog clients
+
+Analog channels reach TVHeadend as 720×480 MPEG-2 with MP2 audio. The video is
+interlaced from a hardware encoder (HVR-1950), already deinterlaced from the raw
+path (800e), and 4:3 either way. Kodi and VLC play that as-is. Browsers and many
+phones, smart TVs and IPTV apps don't. TVHeadend's stock `webtv-*` profiles are a
+poor fit: they scale to 384 lines and don't deinterlace.
+
+`examples/tvh-analog-profiles` creates stream profiles for analog channels (or
+updates them if they already exist). Run it where TVHeadend's ffmpeg runs, so its
+speed test measures the machine that will do the encoding:
+
+```bash
+docker cp examples/tvh-analog-profiles tvheadend:/usr/local/bin/
+docker exec tvheadend tvh-analog-profiles [--user admin --password …] [--dry-run]
+docker exec tvheadend tvh-analog-profiles --remove     # undo
+```
+
+| Profile | Output | For |
+|---|---|---|
+| *(default `htsp`/`pass`)* | MPEG-2/MP2 as received | Kodi (HTSP), VLC: no profile needed, set Kodi's deinterlacing to Auto |
+| `analog-h264-aac-mpegts` | H.264 + AAC, 720×480 4:3, MPEG-TS | IPTV apps, VLC, smart TVs |
+| `analog-h264-aac-matroska` | H.264 + AAC, Matroska | TVHeadend's web player |
+| `analog-mobile` | H.264 + AAC 96k, 540×360, ~1 Mb/s | phones, remote viewing |
+| `analog-h265-aac-mpegts` ⚡ | H.265 + AAC, MPEG-TS, about half the H.264 bitrate | Kodi, VLC, newer TVs |
+| `analog-av1-opus-webm` ⚡ | AV1 + Opus, WebM | Chrome, Firefox, newer phones/TVs |
+| `analog-h264-720p60` ⚡ | H.264 + AAC, 960×720 at **59.94p** | big screens with weak scalers |
+
+All profiles deinterlace only frames that are actually interlaced, and keep the
+4:3 shape. Pick a profile per client (the `?profile=` URL parameter, or a user's or
+access entry's streaming profile in TVHeadend).
+
+⚡ **Only created on machines fast enough for them.** Before creating these, the
+script runs a 4-second test encode with the profile's exact settings. It creates
+the profile only if that runs at least `--min-speed` times real time (default 2,
+leaving headroom for a second client or a recording). `--all` skips the test. The
+test reads about 0.7–0.8× of the speed seen on a real 480i capture, so it errs on
+the cautious side.
+
+On an i7-10700, real 480i capture (8 s), times real time:
+
+| | 480 lines | upscaled to 720 lines |
+|---|---|---|
+| H.264 (x264 veryfast) | 35× | 14× (29.97p), 9.7× (59.94p) |
+| H.265 (x265 veryfast) | 10× | 5.5× |
+| AV1 (SVT-AV1 preset 10) | 10× | 5.8× |
+
+A 4-core Haswell-class box like the Dell OptiPlex 3020 is roughly 4–5× slower, so
+expect H.265, AV1 and 720p60 at 480 lines to pass and the upscaled H.265/AV1
+variants (not offered) to fail.
+
+On upscaling: it adds no detail, and TVs and Kodi boxes rescale just as well. The
+720p60 profile earns its place through **field-rate deinterlacing**: each of the
+59.94 fields per second becomes a frame, so motion is visibly smoother than 29.97p.
+Use it for clients whose own scaler or deinterlacer is poor.
+
+Implementation notes:
+- **Most profiles are TVHeadend "MPEG-TS spawn" profiles.** TVHeadend pipes the
+  channel through the container's ffmpeg (already there for ntsc-tvh). Two
+  reasons:
+  - TVHeadend's own libav MPEG-TS muxer is broken in current linuxserver images
+    (`Unable to parse option value "nit"`; the stock `webtv-h264-aac-mpegts`
+    profile fails the same way).
+  - Spawn reaches encoders TVHeadend's transcoder lacks, such as SVT-AV1.
+- **TVHeadend codec profiles need the H.264 profile left on *auto*.** This build
+  passes a numeric profile that libx264 rejects (`x264 [error]: invalid profile:
+  100`).
+- **x265 prints `set_mempolicy: Operation not permitted` inside Docker.** Its NUMA
+  thread pool is blocked by the default seccomp profile. It's harmless, and
+  TVHeadend doesn't log spawn stderr. Disabling the pool would halve x265's speed.
+
+---
+
 ## 7. Scanning
 
 ```bash
@@ -679,6 +752,10 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
 - **Hybrid-card guard (`DVB_GUARD`).** On a card whose analog and digital sides
   share one tuner, `tune`, `signal`, `stream` and every channel of `scan` refuse
   to start while the DVB side is busy, instead of wedging the card (see §11).
+- **Stream profiles for analog clients** (`examples/tvh-analog-profiles`, §6b):
+  H.264/AAC for IPTV apps, browsers and phones, plus H.265, AV1 and an upscaled
+  59.94p H.264. The heavier profiles are only created if a test encode shows the
+  machine can keep up.
 - **Quieter TVHeadend log.** The `ntsc-tvh: streaming …` status line is only
   printed when stderr is a terminal. TVHeadend logs every stderr line from a pipe
   at ERROR level, so each channel start used to show up as an error. Real errors
