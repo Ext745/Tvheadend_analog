@@ -40,7 +40,8 @@ class BuildFfmpegCmd(unittest.TestCase):
         self.assertEqual(probe(PROBE_SECONDS="", PROBE_SIZE=""), [])   # ffmpeg defaults
 
     def test_raw_has_no_probe_limits(self):
-        self.assertNotIn("-analyzeduration", ntsc.build_ffmpeg_cmd(make_cfg(), RAW))
+        cmd = ntsc.build_ffmpeg_cmd(make_cfg(RAW_AUDIO_DEV="hw:1,0"), RAW)
+        self.assertNotIn("-analyzeduration", cmd)
 
     def test_hw_direct_reads_device(self):
         cmd = ntsc.build_ffmpeg_cmd(make_cfg(CAPTURE_VIA_CAT="0", DEVICE="/dev/video2"), HW)
@@ -169,6 +170,12 @@ class AutodetectAlsa(unittest.TestCase):
     def test_no_arecord(self):
         shutil.rmtree(os.path.join(self.sys, "class", "sound"))
         with mock.patch.object(ntsc, "run", return_value=completed([], returncode=1)):
+            self.assertEqual(self.detect(), "")
+
+    def test_arecord_not_installed(self):
+        # alsa-utils missing: no audio, not a FileNotFoundError traceback
+        shutil.rmtree(os.path.join(self.sys, "class", "sound"))
+        with mock.patch.object(ntsc, "run", side_effect=FileNotFoundError("arecord")):
             self.assertEqual(self.detect(), "")
 
 

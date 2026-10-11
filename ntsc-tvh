@@ -540,7 +540,10 @@ def autodetect_alsa(cfg, info):
     adev = alsa_from_sysfs(cfg)
     if adev:
         return adev
-    r = run(["arecord", "-l"])
+    try:
+        r = run(["arecord", "-l"])
+    except OSError:                 # alsa-utils not installed
+        return ""
     if r.returncode != 0:
         return ""
     want = [w.lower() for w in (info["card"].split()[:1] + [info["driver"]]) if w != "?"]
