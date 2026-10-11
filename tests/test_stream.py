@@ -158,6 +158,11 @@ class AutodetectAlsa(unittest.TestCase):
             self.assertEqual(self.detect(), "")
 
 
+class TTY(io.StringIO):
+    def isatty(self):
+        return True
+
+
 class CmdStream(unittest.TestCase):
     """Tuning and lock handling around the supervisor (supervise() itself is faked here;
     test_supervisor.py runs the real one against real processes)."""
@@ -190,9 +195,9 @@ class CmdStream(unittest.TestCase):
         except ntsc.ChannelError:
             return True
 
-    def stream(self, channel="us-bcast:7", wait=None, **cfg):
+    def stream(self, channel="us-bcast:7", wait=None, tty=True, **cfg):
         self.cfg = make_cfg(self.tmp.name, **cfg)
-        err = io.StringIO()
+        err = TTY() if tty else io.StringIO()
         with redirect_stderr(err), self.assertRaises(SystemExit) as cm:
             ntsc.cmd_stream(self.cfg, argparse.Namespace(channel=channel, wait=wait))
         self.stderr = err.getvalue()
@@ -208,6 +213,12 @@ class CmdStream(unittest.TestCase):
         self.assertIn("--set-freq=175.2500", self.fake.opts())
         self.assertIn("streaming us-bcast:7 (tuner 175.250 MHz) via HW-MPEG", self.stderr)
         self.assertFalse(self.lock_is_held(self.cfg["LOCK_FILE"]))   # released after
+
+    def test_status_line_only_on_a_terminal(self):
+        # Under TVHeadend stderr is a pipe, and every line of it is logged at ERROR level.
+        self.stream(tty=False)
+        self.assertEqual(self.stderr, "")
+        self.assertEqual(len(self.supervised), 1)
 
     def test_cat_only_for_hw_encoder_with_capture_via_cat(self):
         self.stream(CAPTURE_VIA_CAT="0")

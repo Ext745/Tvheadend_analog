@@ -521,10 +521,13 @@ def cmd_stream(cfg, args):
         # cmd already reads "pipe:0" when the cat path is in use (see build_ffmpeg_cmd).
         cmd = build_ffmpeg_cmd(cfg, info)
         via_cat = info["hw_encoder"] and cfg["CAPTURE_VIA_CAT"] == "1"
-        sys.stderr.write(f"ntsc-tvh: streaming {chan['id']} "
-                         f"({'tuner '+format(chan['freq'],'.3f')+' MHz' if chan['freq'] else chan['input']}) "
-                         f"via {'HW-MPEG' if info['hw_encoder'] else 'raw-encode'}\n")
-        sys.stderr.flush()
+        # Status line for interactive runs only: TVHeadend logs every line a pipe writes
+        # to stderr at ERROR level. Real errors (ours and ffmpeg's) still go to stderr.
+        if sys.stderr.isatty():
+            sys.stderr.write(f"ntsc-tvh: streaming {chan['id']} "
+                             f"({'tuner '+format(chan['freq'],'.3f')+' MHz' if chan['freq'] else chan['input']}) "
+                             f"via {'HW-MPEG' if info['hw_encoder'] else 'raw-encode'}\n")
+            sys.stderr.flush()
         rc = supervise(cfg, cmd, lock, via_cat)
     sys.exit(rc)
 

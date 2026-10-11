@@ -565,6 +565,10 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
   ntsc-tvh with `PR_SET_PDEATHSIG`, so TVHeadend's default SIGKILL still takes
   them down at once. ffmpeg still writes straight to TVHeadend's pipe and holds
   the tuner lock until it is gone.
+- **Quieter TVHeadend log.** The `ntsc-tvh: streaming …` status line is only
+  printed when stderr is a terminal. TVHeadend logs every stderr line from a pipe
+  at ERROR level, so each channel start used to show up as an error. Real errors
+  from ntsc-tvh and ffmpeg are still logged.
 
 ---
 
