@@ -5,6 +5,7 @@ import importlib.util
 import io
 import os
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from unittest import mock
@@ -55,15 +56,29 @@ class FakeApi:
 
 class Profiles(unittest.TestCase):
 
-    def run_main(self, *argv, api=None, speed=10.0):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.gpu = os.path.join(tmp.name, "renderD128")      # stands in for /dev/dri/...
+        open(self.gpu, "w").close()
+
+    def run_main(self, *argv, api=None, speed=10.0, bench=None, clip=True):
         api = api or FakeApi()
         out = io.StringIO()
+        if not any(a.startswith("--vaapi-device") for a in argv):
+            argv = (*argv, "--vaapi-device", self.gpu)
+        bench = bench or (lambda v, dev, clip: speed)
         with mock.patch.object(prof.Tvh, "call", side_effect=api), \
-             mock.patch.object(prof, "bench", return_value=speed) as bench, \
+             mock.patch.object(prof, "bench", side_effect=bench) as b, \
+             mock.patch.object(prof, "make_clip", return_value=clip), \
              mock.patch.object(sys, "argv", ["tvh-analog-profiles", *argv]), redirect_stdout(out):
             prof.main()
-        self.bench = bench
+        self.bench = b
         return api, out.getvalue()
+
+    def cmdline(self, api, name):
+        return next(f["conf"]["cmdline"] for p, f in api.writes()
+                    if p == "profile/create" and f["conf"]["name"] == name)
 
     def created(self, api):
         return [(p, f.get("class"), f["conf"]["name"]) for p, f in api.writes() if p.endswith("create")]
@@ -79,8 +94,13 @@ class Profiles(unittest.TestCase):
             ("profile/create", "profile-mpegts-spawn", "analog-h265-aac-mpegts"),
             ("profile/create", "profile-mpegts-spawn", "analog-av1-opus-webm"),
             ("profile/create", "profile-mpegts-spawn", "analog-h264-720p60"),
+            ("profile/create", "profile-mpegts-spawn", "analog-h264-vaapi-mpegts"),
+            ("profile/create", "profile-mpegts-spawn", "analog-h265-vaapi-mpegts"),
+            ("profile/create", "profile-mpegts-spawn", "analog-av1-vaapi-webm"),
+            ("profile/create", "profile-mpegts-spawn", "analog-mobile-vaapi"),
+            ("profile/create", "profile-mpegts-spawn", "analog-h264-vaapi-720p60"),
         ])
-        self.assertEqual(self.bench.call_count, 3)          # only the gated ones are timed
+        self.assertEqual(self.bench.call_count, 8)          # only the gated ones are timed
 
     def test_slow_machine_gets_only_the_base_profiles(self):
         api, out = self.run_main(speed=1.5)
@@ -88,19 +108,44 @@ class Profiles(unittest.TestCase):
         self.assertNotIn("analog-h265-aac-mpegts", names)
         self.assertNotIn("analog-h264-720p60", names)
         self.assertIn("analog-mobile", names)
-        self.assertIn("skip   stream profile analog-av1-opus-webm: 1.5x real time (needs 2.0x)", out)
+        self.assertIn("skip   stream profile analog-av1-opus-webm: 1.5x real time, needs 2.0x", out)
 
     def test_min_speed_and_all(self):
         api, _ = self.run_main("--min-speed", "1.0", speed=1.5)
-        self.assertEqual(len(self.created(api)), 8)
+        self.assertEqual(len(self.created(api)), 13)
         api, _ = self.run_main("--all", speed=0.1)
-        self.assertEqual(len(self.created(api)), 8)
+        self.assertEqual(len(self.created(api)), 13)
         self.assertEqual(self.bench.call_count, 0)
 
     def test_no_ffmpeg_skips_gated_profiles(self):
-        api, out = self.run_main(speed=None)
+        api, out = self.run_main(clip=False)
         self.assertEqual(len(self.created(api)), 5)
         self.assertIn("run inside the TVHeadend container", out)
+        self.assertEqual(self.bench.call_count, 0)
+
+    def test_no_gpu_device_skips_vaapi_profiles(self):
+        api, out = self.run_main("--vaapi-device", self.gpu + "-missing")
+        names = [n for _, _, n in self.created(api)]
+        self.assertFalse([n for n in names if "vaapi" in n])
+        self.assertIn("analog-h264-720p60", names)
+        self.assertIn("devices: /dev/dri:/dev/dri", out)
+
+    def test_vaapi_falls_back_to_software_deinterlace(self):
+        # e.g. a GPU that decodes/encodes but can't run deinterlace_vaapi
+        def bench(v, dev, clip):
+            return None if v.get("label") == "all-GPU" else 20.0
+        api, out = self.run_main(bench=bench)
+        cmd = self.cmdline(api, "analog-h264-vaapi-mpegts")
+        self.assertIn(f"-vaapi_device {self.gpu} -i pipe:0", cmd)
+        self.assertIn("-vf bwdif=0:-1:1,format=nv12,hwupload -c:v h264_vaapi", cmd)
+        self.assertIn("(software deinterlace + GPU encode)", out)
+
+    def test_codec_the_gpu_cant_encode_is_skipped(self):
+        def bench(v, dev, clip):
+            return None if "av1_vaapi" in v["venc"] else 20.0
+        api, out = self.run_main(bench=bench)
+        self.assertNotIn("analog-av1-vaapi-webm", [n for _, _, n in self.created(api)])
+        self.assertIn("skip   stream profile analog-av1-vaapi-webm: all-GPU: not supported", out)
 
     def test_existing_profiles_are_updated_in_place(self):
         api = FakeApi(codecs=["analog-h264", "webtv-h264"], streams=["analog-mobile", "pass"])
@@ -133,16 +178,28 @@ class Profiles(unittest.TestCase):
 class SpawnCommands(unittest.TestCase):
 
     def cmd(self, name):
-        return prof.spawn_cmdline(next(p for p in prof.SPAWN if p["name"] == name))
+        p = next(p for p in prof.SPAWN if p["name"] == name)
+        return prof.spawn_cmdline(p, prof.variants(p)[0], "/dev/dri/renderD128")
 
     def test_reads_stdin_writes_stdout(self):
         for p in prof.SPAWN:
-            with self.subTest(p["name"]):
-                cmd = prof.spawn_cmdline(p)
-                self.assertIn("-i pipe:0", cmd)
-                self.assertTrue(cmd.endswith(f"-f {p['fmt']} pipe:1"))
-                self.assertNotIn("'", cmd)          # TVHeadend splits on spaces, no quoting
-                self.assertNotIn('"', cmd)
+            for v in prof.variants(p):
+                with self.subTest(p["name"], variant=v["label"]):
+                    cmd = prof.spawn_cmdline(p, v, "/dev/dri/renderD128")
+                    self.assertIn("-i pipe:0", cmd)
+                    self.assertTrue(cmd.endswith(f"-f {p['fmt']} pipe:1"))
+                    self.assertNotIn("'", cmd)      # TVHeadend splits on spaces, no quoting
+                    self.assertNotIn('"', cmd)
+                    self.assertNotIn("{dev}", cmd)
+
+    def test_vaapi_all_gpu_command(self):
+        p = next(p for p in prof.SPAWN if p["name"] == "analog-h264-vaapi-720p60")
+        cmd = prof.spawn_cmdline(p, prof.variants(p)[0], "/dev/dri/renderD129")
+        self.assertIn("-hwaccel vaapi -hwaccel_device /dev/dri/renderD129 "
+                      "-hwaccel_output_format vaapi -i pipe:0", cmd)
+        self.assertIn("-vf deinterlace_vaapi=rate=field:auto=1,scale_vaapi=w=960:h=720 "
+                      "-c:v h264_vaapi", cmd)
+        self.assertNotIn("  ", cmd)
 
     def test_deinterlace_only_flagged_frames_except_field_rate(self):
         self.assertIn("-vf bwdif=0:-1:1 ", self.cmd("analog-h264-aac-mpegts"))
@@ -152,15 +209,21 @@ class SpawnCommands(unittest.TestCase):
         self.assertTrue(self.cmd("analog-av1-opus-webm").startswith("env SVT_LOG=1 ffmpeg "))
         self.assertTrue(self.cmd("analog-h265-aac-mpegts").startswith("ffmpeg "))
 
-    def test_bench_parses_speed_and_forces_deinterlace(self):
-        p = next(p for p in prof.SPAWN if p["name"] == "analog-h264-720p60")
+    def test_bench_runs_the_variant_on_the_clip(self):
+        p = next(p for p in prof.SPAWN if p["name"] == "analog-h264-vaapi-mpegts")
+        v = prof.variants(p)[0]
         result = mock.Mock(returncode=0, stderr="frame= 1 speed=1.2x\rframe= 9 speed=4.75x \n")
         with mock.patch.object(prof.subprocess, "run", return_value=result) as run:
-            self.assertEqual(prof.bench(p), 4.75)
+            self.assertEqual(prof.bench(v, "/dev/dri/renderD128", "/tmp/clip.ts"), 4.75)
         argv = run.call_args[0][0]
-        self.assertEqual(argv[argv.index("-vf") + 1], "bwdif=1:-1:0,scale=960:720:flags=lanczos,setsar=1")
+        self.assertEqual(argv[argv.index("-i") - 1], "vaapi")          # -hwaccel_output_format
+        self.assertEqual(argv[argv.index("-i") + 1], "/tmp/clip.ts")
+        self.assertEqual(argv[argv.index("-vf") + 1], "deinterlace_vaapi=auto=1")
+        failed = mock.Mock(returncode=218, stderr="Function not implemented")
+        with mock.patch.object(prof.subprocess, "run", return_value=failed):
+            self.assertIsNone(prof.bench(v, "/dev/dri/renderD128", "/tmp/clip.ts"))
         with mock.patch.object(prof.subprocess, "run", side_effect=FileNotFoundError):
-            self.assertIsNone(prof.bench(p))
+            self.assertIsNone(prof.bench(v, "/dev/dri/renderD128", "/tmp/clip.ts"))
 
 
 if __name__ == "__main__":

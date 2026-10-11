@@ -357,17 +357,38 @@ docker exec tvheadend tvh-analog-profiles --remove     # undo
 | `analog-h265-aac-mpegts` ⚡ | H.265 + AAC, MPEG-TS, about half the H.264 bitrate | Kodi, VLC, newer TVs |
 | `analog-av1-opus-webm` ⚡ | AV1 + Opus, WebM | Chrome, Firefox, newer phones/TVs |
 | `analog-h264-720p60` ⚡ | H.264 + AAC, 960×720 at **59.94p** | big screens with weak scalers |
+| `analog-h264-vaapi-mpegts` ⚡🎮 | as `analog-h264-aac-mpegts`, encoded on the GPU | the same clients, at ~1/10 the CPU |
+| `analog-h265-vaapi-mpegts` ⚡🎮 | H.265 on the GPU | as above |
+| `analog-av1-vaapi-webm` ⚡🎮 | AV1 + Opus on the GPU | as above (needs an AV1-encoding GPU) |
+| `analog-mobile-vaapi` ⚡🎮 | 540×360 ~1 Mb/s on the GPU | phones, remote viewing |
+| `analog-h264-vaapi-720p60` ⚡🎮 | 960×720 59.94p on the GPU | big screens |
 
 All profiles deinterlace only frames that are actually interlaced, and keep the
 4:3 shape. Pick a profile per client (the `?profile=` URL parameter, or a user's or
 access entry's streaming profile in TVHeadend).
 
+🎮 **VAAPI (Intel/AMD GPU) profiles** need the GPU passed into the container
+(`devices: - /dev/dri:/dev/dri`; linuxserver's init gives TVHeadend's user the
+render group by itself). The linuxserver image already ships both Intel VAAPI
+drivers (`iHD` for Broadwell and newer, `i965` for Haswell and older). Each one first
+tries an **all-GPU** chain: hardware MPEG-2 decode, `deinterlace_vaapi` (interlaced
+frames only), hardware encode. On a UHD 630 that took 0.09 s of CPU per 8 s of
+video, against 0.90 s for x264. If that doesn't work, it falls back to
+deinterlacing on the CPU and encoding on the GPU (0.36 s). Which codecs a GPU can
+encode varies:
+- Haswell (the Dell OptiPlex 3020's HD 4600): H.264 only.
+- Skylake and newer: H.264 and H.265.
+- AV1 needs Intel Arc or Meteor Lake and newer.
+
+The script's test encode finds out, and skips what the GPU can't do.
+`--vaapi-device` picks another render node.
+
 ⚡ **Only created on machines fast enough for them.** Before creating these, the
 script runs a 4-second test encode with the profile's exact settings. It creates
 the profile only if that runs at least `--min-speed` times real time (default 2,
 leaving headroom for a second client or a recording). `--all` skips the test. The
-test reads about 0.7–0.8× of the speed seen on a real 480i capture, so it errs on
-the cautious side.
+test encodes a synthetic interlaced MPEG-2 clip and reads about 0.6–0.8× of the
+speed seen on a real 480i capture, so it errs on the cautious side.
 
 On an i7-10700, real 480i capture (8 s), times real time:
 
@@ -757,9 +778,10 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
   share one tuner, `tune`, `signal`, `stream` and every channel of `scan` refuse
   to start while the DVB side is busy, instead of wedging the card (see §11).
 - **Stream profiles for analog clients** (`examples/tvh-analog-profiles`, §6b):
-  H.264/AAC for IPTV apps, browsers and phones, plus H.265, AV1 and an upscaled
-  59.94p H.264. The heavier profiles are only created if a test encode shows the
-  machine can keep up.
+  H.264/AAC for IPTV apps, browsers and phones, plus H.265, AV1, an upscaled
+  59.94p H.264, and VAAPI (GPU) versions at about a tenth of the CPU. The heavier
+  profiles are only created if a test encode shows the machine (and GPU) can keep
+  up.
 - **Quieter TVHeadend log.** The `ntsc-tvh: streaming …` status line is only
   printed when stderr is a terminal. TVHeadend logs every stderr line from a pipe
   at ERROR level, so each channel start used to show up as an error. Real errors

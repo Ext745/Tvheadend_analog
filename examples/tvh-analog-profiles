@@ -4,13 +4,13 @@
 # Analog channels from ntsc-tvh arrive as 720x480 4:3 MPEG-2 with MP2 audio: interlaced
 # from a hardware encoder (HVR-1950), already deinterlaced from the raw path (800e).
 # Kodi (HTSP) and VLC play that as-is; browsers and many phones/IPTV apps don't. These
-# profiles transcode to H.264/AAC (and, on fast enough machines, H.265, AV1 and an
-# upscaled 59.94p H.264), deinterlacing only frames that are actually interlaced and
+# profiles transcode to H.264/AAC (and, on fast enough machines, H.265, AV1, an upscaled
+# 59.94p H.264, and GPU-encoded VAAPI versions), deinterlacing only frames that are actually interlaced and
 # keeping the 4:3 shape. TVHeadend's stock "webtv" profiles scale to 384 lines and
 # don't deinterlace.
 #
 #   tvh-analog-profiles [--url http://host:9981] [--user U --password P] [--dry-run]
-#                       [--min-speed 2.0 | --all]
+#                       [--min-speed 2.0 | --all] [--vaapi-device /dev/dri/renderD128]
 #   tvh-analog-profiles --remove            # delete the profiles again
 #
 # Run it where TVHeadend's ffmpeg runs -- e.g. `docker exec tvheadend tvh-analog-profiles`
@@ -30,6 +30,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -78,9 +79,30 @@ TRANSCODE = [
 # Spawn profiles. bwdif with deint=1 deinterlaces only frames flagged interlaced; the
 # encoders keep the 8:9 pixel shape, so the picture stays 4:3 unless a profile rescales
 # it to square pixels. "gated" profiles are only created if this machine encodes them at
-# --min-speed times real time or better.
+# --min-speed times real time or better. A profile with "variants" tries them in order
+# and uses the first that passes (VAAPI: all-GPU first, then software deinterlace).
 AAC = "-c:a aac -ac 2 -ar 48000 -b:a {}k"
+OPUS = "-c:a libopus -ac 2 -b:a 128k"
 X264 = "-c:v libx264 -preset veryfast -pix_fmt yuv420p"
+# VAAPI (Intel/AMD GPU). All-GPU: hardware MPEG-2 decode, deinterlace_vaapi (auto=1:
+# interlaced frames only), hardware encode -- about a tenth of x264's CPU. Fallback:
+# decode + bwdif on the CPU, then upload, for GPUs/drivers that can't deinterlace.
+VAAPI_GPU = "-hwaccel vaapi -hwaccel_device {dev} -hwaccel_output_format vaapi"
+VAAPI_UPLOAD = "-vaapi_device {dev}"
+
+
+def vaapi(gpu_vf, sw_vf, venc):
+    return [{"label": "all-GPU", "pre": VAAPI_GPU, "vf": gpu_vf, "venc": venc},
+            {"label": "software deinterlace + GPU encode", "pre": VAAPI_UPLOAD,
+             "vf": f"{sw_vf},format=nv12,hwupload", "venc": venc}]
+
+
+def vaapi_scaled(gpu_vf, sw_vf, scale, venc):
+    return [{"label": "all-GPU", "pre": VAAPI_GPU, "vf": f"{gpu_vf},{scale}", "venc": venc},
+            {"label": "software deinterlace + GPU encode", "pre": VAAPI_UPLOAD,
+             "vf": f"{sw_vf},format=nv12,hwupload,{scale}", "venc": venc}]
+
+
 SPAWN = [
     {"name": "analog-h264-aac-mpegts", "gated": False, "mime": "video/mp2t", "fmt": "mpegts",
      "comment": "Analog: H.264/AAC in MPEG-TS (IPTV apps, VLC, smart TVs)",
@@ -97,7 +119,7 @@ SPAWN = [
     {"name": "analog-av1-opus-webm", "gated": True, "mime": "video/webm", "fmt": "webm",
      "comment": "Analog: AV1/Opus in WebM (Chrome, Firefox, newer phones and TVs)",
      "vf": "bwdif=0:-1:1", "venc": "-c:v libsvtav1 -preset 10 -crf 35 -g 60 -pix_fmt yuv420p",
-     "aenc": "-c:a libopus -ac 2 -b:a 128k"},
+     "aenc": OPUS},
     # Upscaling adds no detail. What this profile buys is field-rate deinterlacing: one
     # frame per field, 59.94 frames/s, for smoother motion -- delivered at a size most
     # clients won't rescale again.
@@ -105,26 +127,71 @@ SPAWN = [
      "comment": "Analog: deinterlaced to 59.94p, upscaled to 960x720 H.264/AAC (MPEG-TS)",
      "vf": "bwdif=1:-1:1,scale=960:720:flags=lanczos,setsar=1",
      "venc": f"{X264} -crf 21 -g 120", "aenc": AAC.format(160)},
+    # VAAPI versions. Which codecs a GPU can encode varies (e.g. Haswell: H.264 only;
+    # Skylake+: H.264 + H.265; AV1 needs Intel Arc / Meteor Lake or newer); the test
+    # encode finds out, and a profile the GPU can't do is skipped.
+    {"name": "analog-h264-vaapi-mpegts", "gated": True, "vaapi": True, "mime": "video/mp2t",
+     "fmt": "mpegts", "comment": "Analog: H.264/AAC in MPEG-TS, encoded on the GPU (VAAPI)",
+     "variants": vaapi("deinterlace_vaapi=auto=1", "bwdif=0:-1:1", "-c:v h264_vaapi -qp 24 -g 60"),
+     "aenc": AAC.format(160)},
+    {"name": "analog-h265-vaapi-mpegts", "gated": True, "vaapi": True, "mime": "video/mp2t",
+     "fmt": "mpegts", "comment": "Analog: H.265/AAC in MPEG-TS, encoded on the GPU (VAAPI)",
+     "variants": vaapi("deinterlace_vaapi=auto=1", "bwdif=0:-1:1", "-c:v hevc_vaapi -qp 26 -g 60"),
+     "aenc": AAC.format(160)},
+    {"name": "analog-av1-vaapi-webm", "gated": True, "vaapi": True, "mime": "video/webm",
+     "fmt": "webm", "comment": "Analog: AV1/Opus in WebM, encoded on the GPU (VAAPI)",
+     "variants": vaapi("deinterlace_vaapi=auto=1", "bwdif=0:-1:1",
+                       "-c:v av1_vaapi -rc_mode VBR -b:v 1500k -maxrate 2500k -g 60"),
+     "aenc": OPUS},
+    {"name": "analog-mobile-vaapi", "gated": True, "vaapi": True, "mime": "video/mp2t",
+     "fmt": "mpegts", "comment": "Analog: 360-line H.264/AAC, ~1 Mb/s, encoded on the GPU (VAAPI)",
+     "variants": vaapi_scaled("deinterlace_vaapi=auto=1", "bwdif=0:-1:1",
+                              "scale_vaapi=w=540:h=360",
+                              "-c:v h264_vaapi -rc_mode VBR -b:v 900k -maxrate 1200k -g 60"),
+     "aenc": AAC.format(96)},
+    {"name": "analog-h264-vaapi-720p60", "gated": True, "vaapi": True, "mime": "video/mp2t",
+     "fmt": "mpegts", "comment": "Analog: 59.94p, upscaled to 960x720 H.264/AAC, on the GPU (VAAPI)",
+     "variants": vaapi_scaled("deinterlace_vaapi=rate=field:auto=1", "bwdif=1:-1:1",
+                              "scale_vaapi=w=960:h=720", "-c:v h264_vaapi -qp 23 -g 120"),
+     "aenc": AAC.format(160)},
 ]
-FFMPEG_IN = "ffmpeg -hide_banner -loglevel error -fflags +genpts -i pipe:0 -map 0:v:0 -map 0:a:0?"
 
 
-def spawn_cmdline(p):
-    cmd = f"{FFMPEG_IN} -vf {p['vf']} {p['venc']} {p['aenc']} -f {p['fmt']} pipe:1"
+def variants(p):
+    """The ways a spawn profile can be encoded, best first."""
+    return p.get("variants") or [{"label": "", "pre": "", "vf": p["vf"], "venc": p["venc"]}]
+
+
+def spawn_cmdline(p, v, dev):
+    pre = v["pre"].format(dev=dev)
+    cmd = (f"ffmpeg -hide_banner -loglevel error -fflags +genpts {pre} -i pipe:0 "
+           f"-map 0:v:0 -map 0:a:0? -vf {v['vf']} {v['venc']} {p['aenc']} -f {p['fmt']} pipe:1")
+    cmd = " ".join(cmd.split())
     # SVT-AV1 prints a banner on stderr, which TVHeadend logs as errors. TVHeadend runs
     # the command without a shell, so set its log level through env.
-    return f"env SVT_LOG=1 {cmd}" if "libsvtav1" in p["venc"] else cmd
+    return f"env SVT_LOG=1 {cmd}" if "libsvtav1" in v["venc"] else cmd
 
 
-def bench(p, seconds=4):
-    """Real-time factor of a profile's video encode on this machine, or None if ffmpeg
-    or the encoder isn't available here. Synthetic 720x480 source with light noise, and
-    the deinterlacer runs on every frame (deint=0): calibrated against a real 480i
-    capture this reads 0.7-0.8x of the real speed, i.e. errs on the slow side."""
-    src = "testsrc2=size=720x480:rate=30000/1001,noise=alls=2:allf=t,setsar=8/9"
-    cmd = (["ffmpeg", "-hide_banner", "-nostdin", "-f", "lavfi", "-i", src,
-            "-t", str(seconds), "-vf", p["vf"].replace(":-1:1", ":-1:0")]
-           + p["venc"].split() + ["-an", "-f", "null", "-"])
+def make_clip(path, seconds=4):
+    """A synthetic stand-in for an analog channel: 720x480 4:3 interlaced MPEG-2 (Main
+    profile) with light noise. Real MPEG-2, so the all-GPU variants can decode it."""
+    src = "testsrc2=size=720x480:rate=30000/1001,noise=alls=2:allf=t"
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "lavfi",
+           "-i", src, "-t", str(seconds), "-vf", "setsar=8/9", "-flags", "+ilme+ildct",
+           "-top", "1", "-c:v", "mpeg2video", "-b:v", "6M", "-pix_fmt", "yuv420p",
+           "-f", "mpegts", path]
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=120).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def bench(v, dev, clip):
+    """Real-time factor of one encoding variant on this machine, or None if it doesn't
+    work here (no ffmpeg, encoder, GPU or driver support). Calibrated against a real
+    480i capture, the synthetic clip reads 0.6-0.8x of the real speed: errs slow."""
+    cmd = (["ffmpeg", "-hide_banner", "-nostdin"] + v["pre"].format(dev=dev).split()
+           + ["-i", clip, "-vf", v["vf"]] + v["venc"].split() + ["-an", "-f", "null", "-"])
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=180,
                            env=dict(os.environ, SVT_LOG="1"))
@@ -205,6 +272,8 @@ def main():
                     help="create the H.265 / AV1 / 720p60 profiles only if a test encode on "
                          "this machine runs at least this many times real time (default 2.0)")
     ap.add_argument("--all", action="store_true", help="create every profile, skip the speed test")
+    ap.add_argument("--vaapi-device", default="/dev/dri/renderD128",
+                    help="VAAPI render node for the GPU profiles (default /dev/dri/renderD128)")
     args = ap.parse_args()
     tvh = Tvh(args.url, args.user, args.password, args.dry_run)
     if args.remove:
@@ -219,22 +288,38 @@ def main():
     have = tvh.existing("stream")
     for conf in TRANSCODE:
         tvh.apply("stream", "profile-transcode", dict(conf, enabled=True), have)
-    for p in SPAWN:
-        if p["gated"] and not args.all:
-            speed = bench(p)
-            if speed is None:
-                print(f"skip   stream profile {p['name']}: no ffmpeg/encoder here to test it "
-                      "(run inside the TVHeadend container, or pass --all)")
+    with tempfile.TemporaryDirectory() as tmp:
+        clip = None
+        for p in SPAWN:
+            chosen = variants(p)[0]
+            if p.get("vaapi") and not args.all and not os.path.exists(args.vaapi_device):
+                print(f"skip   stream profile {p['name']}: no {args.vaapi_device} here "
+                      "(pass the GPU into the container: devices: /dev/dri:/dev/dri)")
                 continue
-            if speed < args.min_speed:
-                print(f"skip   stream profile {p['name']}: {speed:.1f}x real time "
-                      f"(needs {args.min_speed}x)")
-                continue
-            print(f"       {p['name']}: {speed:.1f}x real time")
-        conf = {"name": p["name"], "comment": p["comment"], "mime": p["mime"],
-                "enabled": True, "cmdline": spawn_cmdline(p)}
-        tvh.apply("stream", "profile-mpegts-spawn", conf, have)
-
+            if p["gated"] and not args.all:
+                if clip is None:
+                    clip = os.path.join(tmp, "analog.ts")
+                    if not make_clip(clip):
+                        clip = ""
+                chosen, notes = None, []
+                for v in variants(p):
+                    speed = bench(v, args.vaapi_device, clip) if clip else None
+                    if speed is not None and speed >= args.min_speed:
+                        chosen = v
+                        how = f" ({v['label']})" if v["label"] else ""
+                        print(f"       {p['name']}: {speed:.1f}x real time{how}")
+                        break
+                    result = ("not supported by this machine's ffmpeg/GPU/driver" if speed is None
+                              else f"{speed:.1f}x real time, needs {args.min_speed}x")
+                    notes.append(f"{v['label']}: {result}" if v["label"] else result)
+                if chosen is None:
+                    why = ("no ffmpeg here to test with (run inside the TVHeadend container, "
+                           "or pass --all)" if not clip else "; ".join(notes))
+                    print(f"skip   stream profile {p['name']}: {why}")
+                    continue
+            conf = {"name": p["name"], "comment": p["comment"], "mime": p["mime"],
+                    "enabled": True, "cmdline": spawn_cmdline(p, chosen, args.vaapi_device)}
+            tvh.apply("stream", "profile-mpegts-spawn", conf, have)
 
 if __name__ == "__main__":
     main()

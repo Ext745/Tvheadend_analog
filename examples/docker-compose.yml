@@ -59,6 +59,11 @@ services:
       # and turn OFF the OTA EPG grabber in TVHeadend so it doesn't silently claim digital.
       # Cleanest setup: leave ATSC on its own box and keep this one analog-only.
       # - /dev/dvb:/dev/dvb
+
+      # --- GPU for VAAPI stream profiles (optional; see README 6b) ---------------------
+      # Lets examples/tvh-analog-profiles create GPU-encoded profiles (the HD 4600 in
+      # this box encodes H.264 via the image's i965 driver). Nothing else uses it.
+      # - /dev/dri:/dev/dri
     group_add:
       - "44"      # <-- host 'video' GID. VERIFY: getent group video  (fix if not 44)
     restart: unless-stopped
