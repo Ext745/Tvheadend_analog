@@ -46,6 +46,16 @@ class CLI(unittest.TestCase):
         self.assertEqual(lines[0].split(), ["us-bcast:2", "55.250", "MHz", "Broadcast", "2"])
         self.assertEqual(lines[-1].split(), ["input:svideo", "line", "input", "S-Video", "In"])
 
+    def test_list_unknown_table_is_clean_error(self):
+        r = self.cli("list", "--tables", "us-bcast,bogus", rc=1)
+        self.assertEqual(r.stdout, "")
+        self.assertIn("error: unknown table 'bogus'", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_list_ignores_empty_table_names(self):
+        lines = self.cli("list", "--tables", "us-bcast,").stdout.splitlines()
+        self.assertEqual(len(lines), 68 + 2)
+
     def test_list_all_tables_json(self):
         chans = json.loads(self.cli("list", "--json").stdout)
         self.assertEqual(len(chans), 68 + 3 * 135 + 2)

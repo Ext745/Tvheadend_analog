@@ -199,6 +199,8 @@ def parse_channel(cid):
 def all_channels(tables):
     out = []
     for t in tables:
+        if t not in TABLES:
+            raise ChannelError(f"unknown table '{t}' (have: {', '.join(TABLES)})")
         spec = TABLES[t]
         for ch in spec["range"]:
             if spec["freq"](ch) is not None:
@@ -865,7 +867,7 @@ def cmd_list(cfg, args):
             return
     else:
         tables = args.tables.split(",") if args.tables else list(TABLES)
-        chans = all_channels([t.strip() for t in tables])
+        chans = all_channels([t.strip() for t in tables if t.strip()])
         if cfg["INPUTS_ALWAYS_ACTIVE"] == "1":
             chans += [parse_channel(f"input:{n}") for n in INPUT_CHANNELS]
     if args.json:
