@@ -1,9 +1,11 @@
-# docker-compose.yml — TVHeadend + analog NTSC (ntsc-tvh) on a dedicated Dell OptiPlex 3020
+# docker-compose.yml — TVHeadend + analog NTSC (ntsc-tvh) with a Hauppauge HVR-1950
 # ---------------------------------------------------------------------------------------
-# This box has native USB 2.0 ports, so the pvrusb2 "firmware2" upload succeeds and the
-# HVR-1950's hardware MPEG-2 encoder works. No xHCI workarounds are needed here — note
-# there is NO seccomp:unconfined and NO privileged: true (both were dead ends on the old
-# all-USB-3 host; the real blocker there was the xHCI firmware2 upload, fixed by this box).
+# The HVR-1950 needs a USB 2.0 path so the pvrusb2 "firmware2" upload succeeds and its
+# hardware MPEG-2 encoder works: native USB 2.0 ports (as on the Dell OptiPlex 3020 this
+# was first written for) or, on an xHCI-only PC like the Dell 7090 it runs on now, a
+# powered USB hub in front of the card (README §2). That is a host/cabling fix, not a
+# container one — note there is NO seccomp:unconfined and NO privileged: true (both were
+# dead ends on an all-USB-3 host; the real blocker there was the firmware2 upload).
 #
 # BEFORE the first `docker compose up -d`, on the HOST:
 #   1. Create the dirs:

@@ -82,7 +82,7 @@ sudo apt install v4l-utils ffmpeg          # Debian/Ubuntu
 
 | | Hauppauge WinTV-HVR-1950 | Pinnacle PCTV HD Pro Stick (800e) |
 |---|---|---|
-| Status | production (Dell OptiPlex 3020, USB 2.0); also verified on the workbench (Tiger Lake xHCI, behind a USB hub) | dev/test (workbench, Tiger Lake xHCI) |
+| Status | production: Dell 7090 (Intel Tiger Lake, xHCI-only — behind a powered USB hub, see §2); previously a Dell OptiPlex 3020 (native USB 2.0) | dev/test, on the same Dell 7090 |
 | Driver | `pvrusb2` | `em28xx` (card=17, em2882/3), USB `2304:0227` |
 | Analog path | hardware MPEG-2 encoder (cx23416) → remux, via `cat` | raw YUYV (tvp5150am1 decoder) → software MPEG-2 + ALSA |
 | Tuner / ATSC | single front-end; analog/DVB mutually exclusive | xc3028 tuner shared with an LGDT3303 ATSC demod; **not** exclusive (see §11) |
@@ -981,7 +981,7 @@ SIGKILL with nothing left holding the tuner, scan → state → M3U, and the exa
 
 The `*-800e.txt` fixtures were captured from a real Pinnacle 800e (em28xx). The
 HVR-1950 ones are modelled on `v4l2-ctl` output, not captured from the real box. To
-pin them to the real hardware, capture these on the OptiPlex and replace the
+pin them to the real hardware, capture these on the HVR-1950's host and replace the
 matching `tests/fixtures/*.txt` files:
 
 ```bash
