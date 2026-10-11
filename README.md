@@ -42,16 +42,26 @@ Network** build them from an M3U this tool generates.
   `v4l-cx2341x-enc.fw` (the MPEG-2 *encoder*, 376836 bytes)**. The encoder blob
   is the one people miss — without a working encoder you get a device that
   tunes and reports signal but produces an *empty stream on every channel*.
-  It's non-redistributable (not in `linux-firmware`); get it from the Debian
-  `ivtv-firmware` package (`snapshot.debian.org`) or extract it from the Windows
-  driver.
+  Recent distros ship the decoder and encoder files (Ubuntu: `linux-firmware-misc`;
+  `ls /lib/firmware/v4l-cx*` may show them as `.fw.zst`). The FX2 file usually
+  isn't packaged: LibreELEC's [dvb-firmware](https://github.com/LibreELEC/dvb-firmware/tree/master/firmware)
+  repository has all three (`v4l-pvrusb2-73xxx-01.fw`: 8192 bytes, MD5
+  `c6b01cb318b909cc52d2cf643ca269a1`). Older sources: the Debian `ivtv-firmware`
+  package (`snapshot.debian.org`) or the Windows driver. Replug the tuner after
+  installing.
 - **A USB 2.0 path to the tuner.** This is the single biggest gotcha. The
   pvrusb2 *encoder* firmware is uploaded over USB at enumeration ("firmware2"),
   and that large transfer **fails on many xHCI / USB-3 host controllers** —
   `dmesg` shows `pvrusb2: firmware2 upload transfer failure`, and again you get a
   tuner that tunes but never streams. The fix is a real USB-2/EHCI path: a
   USB-2 port, a powered USB-2 hub in front of a USB-3 port, or a BIOS xHCI-mode
-  option. **Before anything else, confirm a clean enumeration:**
+  option. **On newer PCs every port is xHCI**, the black "USB 2" ones included
+  (`lspci | grep -i usb` lists only an xHCI controller; `lsusb -t` shows the card
+  straight under an `xhci_hcd` root hub), so there a USB-2 port does *not* help —
+  use the hub. A USB-3 hub works too: it contains a USB-2 hub, and the card runs
+  through that half (`lsusb -t` then shows it under a `480M` hub). Verified on an
+  Intel Tiger Lake (xHCI-only) PC: firmware2 failed on every root port, worked
+  behind a VIA USB-3 hub. **Before anything else, confirm a clean enumeration:**
   `dmesg | grep -i pvrusb2` must show *"Device initialization completed
   successfully"* with **no** `firmware2 upload transfer failure`.
 - **`v4l-utils`** (provides `v4l2-ctl`) and **`ffmpeg`** (with the `mpegts`
@@ -72,12 +82,26 @@ sudo apt install v4l-utils ffmpeg          # Debian/Ubuntu
 
 | | Hauppauge WinTV-HVR-1950 | Pinnacle PCTV HD Pro Stick (800e) |
 |---|---|---|
-| Status | production (Dell OptiPlex 3020, USB 2.0) | dev/test (workbench, Tiger Lake xHCI) |
+| Status | production (Dell OptiPlex 3020, USB 2.0); also verified on the workbench (Tiger Lake xHCI, behind a USB hub) | dev/test (workbench, Tiger Lake xHCI) |
 | Driver | `pvrusb2` | `em28xx` (card=17, em2882/3), USB `2304:0227` |
 | Analog path | hardware MPEG-2 encoder (cx23416) → remux, via `cat` | raw YUYV (tvp5150am1 decoder) → software MPEG-2 + ALSA |
 | Tuner / ATSC | single front-end; analog/DVB mutually exclusive | xc3028 tuner shared with an LGDT3303 ATSC demod; **not** exclusive (see §11) |
 | Firmware | `v4l-pvrusb2-73xxx-01.fw`, `v4l-cx25840.fw`, `v4l-cx2341x-enc.fw` | `xc3028-v27.fw` |
 | Audio | inside the MPEG-2 stream | ALSA card `Em28xxAudio` (auto-detected via sysfs) |
+
+HVR-1950 behaviour seen in testing (kernel 7.0):
+- With no signal it shows a **black** screen (luma 0–1), not snow; the video
+  scan's contrast check rejects it. Signal reads **0 %** without an analog carrier.
+- The driver itself refuses the analog node (`Operation not permitted`) while its
+  ATSC side is receiving, so it can't be wedged the way the 800e can (§11).
+- Its ATSC side (Samsung S5H1411) received cleaner than the 800e's on the same
+  antenna: SNR 23.5 dB with no uncorrectable blocks.
+- A stream's first byte arrives ~1.5 s after the start (`PROBE_SECONDS`, §10).
+- Every `analog-*` profile (on its 480i) and every `digital-*` profile (on its ATSC
+  side, 1080i) from `examples/tvh-stream-profiles` plays, software and VAAPI, and
+  the "Analog H.264" DVR configs record cleanly.
+- `dmesg` sometimes logs `device's encoder appears to be stuck` at a stream start
+  (§11); harmless when occasional.
 
 800e behaviour seen in testing (kernel 7.0):
 - It powers up in **PAL** 720×576. `tune` switches it to NTSC 720×480.
@@ -579,8 +603,8 @@ Analog "is this channel live?" is inherently fuzzy. Three strategies:
   HVR-1950) is coarse and not calibrated; a strong-but-unmodulated carrier can
   read "active." Tune `SCAN_THRESHOLD` to your plant.
 - **`video`** — grabs six frames (3 s) and judges the picture on three measures:
-  - **contrast** (`var`, luma std-dev): rejects the flat blue/black raster a
-    decoder like the HVR-1950's cx25840 shows without sync.
+  - **contrast** (`var`, luma std-dev): rejects the flat raster a decoder shows
+    without sync (black on the HVR-1950's cx25843).
   - **spatial noise** (`noise`): difference between vertically adjacent pixels,
     relative to contrast. Real images are locally smooth; snow is not. Only the
     vertical direction is used: analog snow is streaked along the scan lines, so
@@ -709,7 +733,8 @@ This has several distinct causes that look identical; check them in order:
 1. *`dmesg | grep -i pvrusb2` shows `firmware2 upload transfer failure`* — the
    MPEG **encoder** firmware didn't upload. Almost always an **xHCI / USB-3**
    host-controller issue. Move the tuner to a USB-2 port, interpose a powered
-   USB-2 hub, or find a BIOS xHCI-mode option. A clean enumeration ends in
+   USB-2 hub, or find a BIOS xHCI-mode option. On an xHCI-only PC the USB-2 ports
+   don't help; only the hub does (see §2). A clean enumeration ends in
    *"Device initialization completed successfully"* with no firmware2 error.
    This is deterministic (fails every boot), not flaky — if it reproduces across
    power-cycles, suspect the controller, not a loose cable. (Test the device on
@@ -723,6 +748,12 @@ This has several distinct causes that look identical; check them in order:
    ffmpeg-opens-the-device-directly failure. Ensure `CAPTURE_VIA_CAT=1` (now the
    default). On some ffmpeg builds `-f mpeg -i /dev/video0` yields no stream while
    `cat /dev/video0 | ffmpeg -f mpeg -i pipe:0` is reliable.
+
+**`dmesg`: `pvrusb2: ***WARNING*** device's encoder appears to be stuck`.** Seen on
+roughly one in three HVR-1950 stream starts in testing, followed by `Giving up on
+command ... normally recovered via a firmware reload`. The driver reloads the
+encoder firmware and the stream starts ~0.8 s later than usual; nothing else is
+affected. Only worry if it repeats on every start or the stream then stays empty.
 
 **`Operation not permitted` opening `/dev/video0`.** Not a sandbox issue and not
 "device busy" — it's the pvrusb2 **analog/digital mutual exclusion**. TVHeadend
@@ -923,6 +954,11 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
   `video`-method scan probe) waited ~6.5 s. It now analyses at most 1 s / 500 KB
   (`PROBE_SECONDS`, `PROBE_SIZE`): first byte in ~1.1 s on the HVR-1950, with the same
   MPEG-2 720×480 4:3 + MP2 streams detected.
+- **Raw cards no longer crash without `alsa-utils`.** When sysfs didn't name the
+  card's audio and `arecord` wasn't installed, `stream` and `doctor` died with a
+  traceback; they now carry on without audio.
+- **`list --tables` with a wrong name** prints `error: unknown table ...` instead
+  of a Python traceback.
 
 ---
 

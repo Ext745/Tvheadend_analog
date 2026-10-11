@@ -140,6 +140,16 @@ class PictureMetrics(unittest.TestCase):
         ok, m = self.judge(fixture_bytes("noise-800e-svideo-unconnected.gray"))
         self.assertFalse(ok, m)
 
+    def test_real_hvr1950_no_signal_black_is_not_a_picture(self):
+        # The HVR-1950's cx25843 shows black, not snow, without sync (here RF 12 with only
+        # ATSC on air). Luma flickers 0..1, so it is not perfectly flat -- the contrast gate
+        # has to catch it, as the noise/motion metrics are never computed.
+        ok, m = self.judge(fixture_bytes("black-hvr1950-ch12.gray"))
+        self.assertFalse(ok, m)
+        self.assertGreater(m["var"], 0.0)
+        self.assertLess(m["var"], 1.0)
+        self.assertIsNone(m["noise"])
+
     def test_random_noise_is_not_a_picture(self):
         self.assertFalse(self.judge(noise_frames(6))[0])
 
