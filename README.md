@@ -92,13 +92,24 @@ sudo apt install v4l-utils ffmpeg          # Debian/Ubuntu
   [dvb-firmware](https://github.com/LibreELEC/dvb-firmware/raw/master/firmware/xc3028-v27.fw)
   repository (66 220 bytes, MD5 `293dc5e915d9a0f74a368f8a2ce3cc10`).
 
-References:
-- LinuxTV wiki: [Hardware device information](https://www.linuxtv.org/wiki/index.php/Hardware_device_information),
-  [Hauppauge WinTV-HVR-1950](https://www.linuxtv.org/wiki/index.php/Hauppauge_WinTV-HVR-1950),
-  [Pvrusb2](https://www.linuxtv.org/wiki/index.php/Pvrusb2). The wiki sits
-  behind a JavaScript bot check, so open it in a browser.
-- [pvrusb2 project page](http://www.isely.net/pvrusb2/pvrusb2.html) (Mike Isely,
-  driver maintainer).
+**Other cards.** To check what your card can do on Linux, look it up in the
+LinuxTV wiki's [Hardware device information](https://www.linuxtv.org/wiki/index.php/Hardware_device_information)
+list. The wiki sits behind a JavaScript bot check, so open it in a browser. What
+matters for ntsc-tvh:
+- **An analog (NTSC) tuner or composite/S-Video input with a V4L2 driver.**
+  Digital-only (ATSC/DVB) cards don't apply; TVHeadend handles those natively.
+- **Hardware MPEG encoder or raw frames.** Cards with an on-board encoder (like
+  the HVR-1950) are remuxed with no CPU cost. Raw-frame cards (like the 800e)
+  are encoded in software, with audio from ALSA. `ntsc-tvh doctor` reports
+  which path it detected.
+- **Firmware.** Many tuners need a firmware file the distro doesn't ship.
+- **Hybrid analog+digital cards.** Check whether one tuner serves both sides.
+  If it does, don't use analog and ATSC at the same time (see §11).
+
+Driver pages for the cards above: [Hauppauge WinTV-HVR-1950](https://www.linuxtv.org/wiki/index.php/Hauppauge_WinTV-HVR-1950),
+[Pvrusb2](https://www.linuxtv.org/wiki/index.php/Pvrusb2), and the
+[pvrusb2 project page](http://www.isely.net/pvrusb2/pvrusb2.html) (Mike Isely,
+driver maintainer).
 
 ---
 
