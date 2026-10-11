@@ -403,6 +403,13 @@ captions through. The GPU profiles drop them. ffmpeg's `h264_vaapi` and
 `hevc_vaapi` fail on captioned streams when asked to copy them (`Encode failed:
 -28`), so the script turns that off for them.
 
+**Making your own:** [docs/custom-profiles.md](docs/custom-profiles.md) explains
+stream, codec and DVR profiles, both ways to build them (TVHeadend's transcoder or
+an ffmpeg spawn profile), and the pitfalls of this TVHeadend build. It includes
+tested recipes: audio-only fix, analog denoise, overscan crop, loudness, low
+latency, 5.1 passthrough and GPU encoding. It also covers how to test and
+measure a profile.
+
 ### Choosing a profile
 
 Measured on this project's test PC (i7-10700 with UHD 630 graphics) with real
