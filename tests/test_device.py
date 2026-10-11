@@ -97,7 +97,13 @@ class Inputs(DeviceTestCase):
 class Signal(DeviceTestCase):
 
     def test_parses_strength_and_afc(self):
+        # Real HVR-1950 on an RF-modulator test pattern (us-bcast:4).
         fake = self.use(FakeV4L2(signal_for={175.25: fixture("v4l2-get-tuner-locked.txt")}))
+        fake.freq = 175.25
+        self.assertEqual(ntsc.get_signal(make_cfg()), (100, 0))
+
+    def test_parses_negative_afc(self):
+        fake = self.use(FakeV4L2(signal_for={175.25: "\tSignal strength/AFC  : 87%/-12\n"}))
         fake.freq = 175.25
         self.assertEqual(ntsc.get_signal(make_cfg()), (87, -12))
 
@@ -187,7 +193,7 @@ class CmdSignal(DeviceTestCase):
     def test_tuner_channel(self):
         self.use(FakeV4L2(signal_for={175.25: fixture("v4l2-get-tuner-locked.txt")}))
         self.assertEqual(self.signal("us-bcast:7"),
-                         "us-bcast:7  175.250 MHz  signal=87%  afc=-12 Hz\n")
+                         "us-bcast:7  175.250 MHz  signal=100%  afc=0 Hz\n")
 
     def test_tuner_that_does_not_move(self):
         self.use(FakeV4L2(stuck=True))

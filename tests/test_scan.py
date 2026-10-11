@@ -247,7 +247,7 @@ class CmdScan(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        locked = fixture("v4l2-get-tuner-locked.txt")   # 87 %
+        locked = fixture("v4l2-get-tuner-locked.txt")   # 100 %, real HVR-1950
         self.fake = FakeV4L2(signal_for={67.25: locked, 175.25: locked, 217.25: locked})
         for target, kw in (("run", {"new": self.fake}), ("device_info", {"return_value": HW})):
             p = mock.patch.object(ntsc, target, **kw)
@@ -271,8 +271,8 @@ class CmdScan(unittest.TestCase):
     def test_finds_active_channels_and_writes_state_and_m3u(self):
         state = self.scan()
         self.assertEqual([c["id"] for c in state["active"]], ["us-bcast:4", "us-bcast:7"])
-        self.assertEqual(state["active"][0]["signal"], 87)
-        self.assertEqual(state["active"][0]["afc"], -12)
+        self.assertEqual(state["active"][0]["signal"], 100)
+        self.assertEqual(state["active"][0]["afc"], 0)
         self.assertEqual((state["device"], state["card"], state["method"], state["threshold"],
                           state["tables"]),
                          ("/dev/video0", HW["card"], "signal", 35, ["us-bcast"]))
@@ -298,6 +298,8 @@ class CmdScan(unittest.TestCase):
                           "us-bcast:4", "us-bcast:7"])
 
     def test_threshold_and_dwell_overrides(self):
+        weak = "\tSignal strength/AFC  : 87%/-12\n"            # below the 90 % threshold
+        self.fake.signal_for = {67.25: weak, 175.25: weak, 217.25: weak}
         state = self.scan(threshold=90, dwell=0.1)
         self.assertEqual(state["active"], [])
         self.assertEqual(state["threshold"], 90)

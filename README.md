@@ -91,7 +91,10 @@ sudo apt install v4l-utils ffmpeg          # Debian/Ubuntu
 
 HVR-1950 behaviour seen in testing (kernel 7.0):
 - With no signal it shows a **black** screen (luma 0–1), not snow; the video
-  scan's contrast check rejects it. Signal reads **0 %** without an analog carrier.
+  scan's contrast check rejects it. Signal reads **0 %** without an analog carrier
+  and **100 %** on a real one (an RF modulator on us-bcast:4), so the `signal` scan
+  method works on this card. A full us-bcast scan found exactly that channel with
+  either method (`signal` 2 min, `video` ~6 min for 68 channels).
 - The driver itself refuses the analog node (`Operation not permitted`) while its
   ATSC side is receiving, so it can't be wedged the way the 800e can (§11).
 - Its ATSC side (Samsung S5H1411) received cleaner than the 800e's on the same
@@ -631,7 +634,8 @@ Analog "is this channel live?" is inherently fuzzy. Three strategies:
   missed; calm ones survive σ 20–30+. First real analog picture (an RF
   modulator's colour bars on us-bcast:4, 800e): `noise` 0.17, `motion` 0.01–0.03,
   so live; its neighbours 3 and 5 (snow) scored `noise` 0.69–0.83 and `motion`
-  1.3–1.4, so empty. `scan` prints `var`, `noise` and `motion` for every channel,
+  1.3–1.4, so empty. The HVR-1950 on the same picture: `noise` 0.17, `motion`
+  0.01, live; its empty channels are black, so empty. `scan` prints `var`, `noise` and `motion` for every channel,
   so the thresholds can be tuned, and `examples/analog-check` (§14) repeats this
   check for one channel.
 - **`both`** — require signal AND a picture. Fewest false positives, slowest.
@@ -988,12 +992,9 @@ SIGKILL with nothing left holding the tuner, scan → state → M3U, and the exa
 The `*-800e.txt` fixtures were captured from a real Pinnacle 800e (em28xx), and
 the HVR-1950 ones (`v4l2-all-hvr1950.txt`, `v4l2-list-inputs-hvr1950.txt`,
 `v4l2-get-tuner-nosignal.txt`) from the real card (kernel 7.0, tuned to us-bcast:7
-with no analog carrier). Only `v4l2-get-tuner-locked.txt` is still modelled: it
-needs the tuner locked on a live analog channel. Once one is available, replace it:
-
-```bash
-v4l2-ctl -d /dev/video0 --get-tuner    > v4l2-get-tuner-locked.txt   # tuned to a live channel
-```
+with no analog carrier), and `v4l2-get-tuner-locked.txt` from it locked on an RF
+modulator's test pattern on us-bcast:4 (100 %, AFC 0). `analog-check` (below) saves
+the same `--get-tuner` output for any channel you check.
 
 ### Checking a real analog channel: `examples/analog-check`
 
