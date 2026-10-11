@@ -59,6 +59,7 @@ class BuildFfmpegCmd(unittest.TestCase):
             "-f", "v4l2", "-i", "/dev/video0",
             "-f", "alsa", "-ac", "2", "-ar", "48000", "-i", "hw:1,0",
             "-c:v", "mpeg2video", "-b:v", "4000000", "-filter:v", "yadif=0:-1:0",
+            "-aspect", "4:3",                      # 720x480 analog is 4:3, not 3:2
             "-c:a", "mp2", "-b:a", "224k",       # "copy" is meaningless for ALSA PCM
             "-f", "mpegts", "pipe:1"])
 

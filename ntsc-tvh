@@ -53,6 +53,8 @@ DEFAULTS = {
     "AUDIO_CODEC":   "copy",          # copy | mp2 | ac3   (copy keeps the encoder's MP2 audio)
     "VIDEO_BITRATE": "",              # e.g. 6000000 ; "" = leave driver default (HW encoder)
     "RAW_VBITRATE":  "6000000",      # software-encode bitrate for raw devices
+    "RAW_ASPECT":    "4:3",           # display aspect written into the raw-path MPEG-2 (720x480
+                                      #   analog is 4:3, not square pixels; 16:9 for anamorphic)
     "RAW_AUDIO_DEV": "",              # ALSA capture dev for raw devices; "" = autodetect
     "CAPTURE_VIA_CAT": "1",           # 1 = `cat DEV | ffmpeg` (HW path). Default ON: on several
                                       #   ffmpeg builds, letting ffmpeg open the MPEG node directly
@@ -384,7 +386,7 @@ def build_ffmpeg_cmd(cfg, info):
     if adev:
         cmd += ["-f", "alsa", "-ac", "2", "-ar", "48000", "-i", adev]
     cmd += ["-c:v", "mpeg2video", "-b:v", cfg["RAW_VBITRATE"],
-            "-filter:v", "yadif=0:-1:0"]
+            "-filter:v", "yadif=0:-1:0", "-aspect", cfg["RAW_ASPECT"]]
     cmd += (aargs if acodec != "copy" else ["-c:a", "mp2", "-b:a", "224k"])
     cmd += ["-f", "mpegts", "pipe:1"]
     return cmd

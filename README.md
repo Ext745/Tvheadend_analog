@@ -458,6 +458,7 @@ a `# comment` after whitespace is ignored. The most useful:
 | `VIDEO_BITRATE`        | *(driver default)*               | pin HW MPEG-2 bitrate, e.g. `6000000`     |
 | `CAPTURE_VIA_CAT`      | `1`                              | `1` = `cat dev \| ffmpeg` (reliable read; stream + video scan) |
 | `STOP_GRACE`           | `1`                              | seconds ffmpeg gets after SIGTERM before SIGKILL |
+| `RAW_ASPECT`           | `4:3`                            | display aspect of raw-card video (`16:9` for anamorphic) |
 | `SCAN_VAR_MIN`         | `12`                             | video scan: min contrast (rejects flat screens) |
 | `SCAN_NOISE_MAX`       | `0.60`                           | video scan: max spatial noise of a picture |
 | `SCAN_MOTION_MAX`      | `0.9`                            | video scan: max frame-to-frame change of a picture |
@@ -672,6 +673,9 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
   contrast alone, so on tuners that show snow (the 800e) every empty channel
   was "active". It now also checks spatial noise and frame-to-frame motion
   (`SCAN_NOISE_MAX`, `SCAN_MOTION_MAX`; see §7).
+- **Raw cards keep a 4:3 picture.** The software MPEG-2 encode labelled 720×480
+  analog as square pixels (3:2), so players showed it about 12% too wide. It is
+  now written as 4:3 (`RAW_ASPECT`, `16:9` for anamorphic sources).
 - **Hybrid-card guard (`DVB_GUARD`).** On a card whose analog and digital sides
   share one tuner, `tune`, `signal`, `stream` and every channel of `scan` refuse
   to start while the DVB side is busy, instead of wedging the card (see §11).
