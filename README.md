@@ -878,8 +878,35 @@ either case. If you still see this, check for a stray ffmpeg holding the device
   which is correct for analog SD — let the client deinterlace).
 - **Frequency tables are US/NTSC-M.** PAL/SECAM or European cable channel-letter
   schemes aren't included; the table functions are trivial to extend if needed.
+  See [NTSC-M countries](#ntsc-m-countries) below for where the video standard fits.
 - **Stable-URL contract** with the Automatic Network is load-bearing — honored
   here, but don't defeat it by templating the URLs yourself.
+
+### NTSC-M countries
+
+ntsc-tvh sets the tuner to **NTSC-M** (`STANDARD=ntsc`), the analog standard of the
+countries below, according to [World Population Review's list](https://worldpopulationreview.com/country-rankings/ntsc-countries)
+(built from a 2017 source). That list gives each country's analog standard. It does
+**not** say analog is still on the air, and in many of these countries analog
+broadcasting has been switched off for digital. What still matters is the video:
+VCRs, camcorders, game consoles, set-top boxes and RF modulators from these
+countries put out NTSC-M.
+
+| Analog standard | Countries |
+|---|---|
+| NTSC-M | United States, Canada, Mexico, Philippines, Colombia, Peru, Venezuela, Taiwan, Chile, Guatemala, Ecuador, Bolivia, Dominican Republic, Honduras, Cuba, Nicaragua, Paraguay, El Salvador, Costa Rica, Panama, Trinidad and Tobago, Suriname, Myanmar, Cambodia, Jamaica, Barbados, Guam |
+| NTSC (no variant given) | South Korea, Haiti, Belize, Saint Lucia, Antigua and Barbuda |
+| NTSC / PAL-B | Greenland |
+| NTSC-J | Japan (listed as NTSC-M on that page; Japan's variant has no 7.5 IRE black setup and its own channel frequencies) |
+
+Not NTSC, despite being in the Americas: Brazil (PAL-M), Argentina and Uruguay
+(PAL-N).
+
+What this means for ntsc-tvh:
+- **Composite and S-Video inputs** work with NTSC-M video from any of these countries.
+- **RF channels** use the US tables (`us-bcast`, `us-cable`, `us-cable-irc`,
+  `us-cable-hrc`). Countries that copied the US channel plan line up; others need
+  their own table, and Japan's channels sit on different frequencies entirely.
 
 ---
 
