@@ -78,18 +78,20 @@ stdout to the client. Rules for the command line:
 - **No shell and no quotes.** TVHeadend splits the command on spaces itself. A
   filter like `bwdif=0:-1:1,scale=-2:540` is fine. Anything needing quotes isn't.
   To set an environment variable, prefix the command with `env NAME=value`.
-- **Start with** `ffmpeg -hide_banner -loglevel error -fflags +genpts -i pipe:0`.
+- **Start with** `ffmpeg -hide_banner -loglevel error -fflags +genpts -analyzeduration 1000000 -probesize 5000000 -i pipe:0`.
 - **`-ac 2`** downmixes to stereo. Without it, AAC keeps a digital channel's 5.1.
 - **`-map 0:v:0 -map 0:a:0?`** takes the video and the first (main) audio track. The
   `?` keeps it working on a channel with no audio. Use `-map 0:a` instead for all
   audio tracks.
 - **TVHeadend doesn't log the command's stderr,** so test the command by hand
   first (§7).
+- **`-analyzeduration 1000000 -probesize 5000000`** makes ffmpeg start encoding after
+  1 s of the stream instead of ~5 s. Without it each channel start waits ~4 s longer.
 
 Template:
 
 ```
-ffmpeg -hide_banner -loglevel error -fflags +genpts -i pipe:0 -map 0:v:0 -map 0:a:0? -vf FILTERS VIDEO-OPTIONS AUDIO-OPTIONS -f mpegts pipe:1
+ffmpeg -hide_banner -loglevel error -fflags +genpts -analyzeduration 1000000 -probesize 5000000 -i pipe:0 -map 0:v:0 -map 0:a:0? -vf FILTERS VIDEO-OPTIONS AUDIO-OPTIONS -f mpegts pipe:1
 ```
 
 ## 5. Recipes
@@ -101,7 +103,7 @@ field.
 picture but has no sound (no MP2 or AC-3 decoder). It costs almost no CPU and
 loses no picture quality:
 ```
-ffmpeg -hide_banner -loglevel error -fflags +genpts -i pipe:0 -map 0:v:0 -map 0:a:0? -c:v copy -c:a aac -ac 2 -b:a 160k -f mpegts pipe:1
+ffmpeg -hide_banner -loglevel error -fflags +genpts -analyzeduration 1000000 -probesize 5000000 -i pipe:0 -map 0:v:0 -map 0:a:0? -c:v copy -c:a aac -ac 2 -b:a 160k -f mpegts pipe:1
 ```
 
 **Analog: denoise weak reception.** `hqdn3d` before the encoder removes snow
@@ -109,7 +111,7 @@ that would otherwise waste bits. It made a lightly noisy clip 6% smaller, and
 noisier reception gains more. Raise the numbers for stronger denoising, which
 eventually smears detail:
 ```
-ffmpeg -hide_banner -loglevel error -fflags +genpts -i pipe:0 -map 0:v:0 -map 0:a:0? -vf bwdif=0:-1:1,hqdn3d=2:1:3:3 -c:v libx264 -preset veryfast -crf 22 -g 60 -pix_fmt yuv420p -c:a aac -ac 2 -b:a 160k -f mpegts pipe:1
+ffmpeg -hide_banner -loglevel error -fflags +genpts -analyzeduration 1000000 -probesize 5000000 -i pipe:0 -map 0:v:0 -map 0:a:0? -vf bwdif=0:-1:1,hqdn3d=2:1:3:3 -c:v libx264 -preset veryfast -crf 22 -g 60 -pix_fmt yuv420p -c:a aac -ac 2 -b:a 160k -f mpegts pipe:1
 ```
 
 **Analog: crop overscan.** Analog pictures have noisy edges, and VBI lines at
@@ -117,35 +119,35 @@ the top, that a CRT hid. This crops 8 pixels each side (704×464). The picture
 keeps its correct shape: what's left is slightly narrower than 4:3, exactly as
 it was on the original screen.
 ```
-ffmpeg -hide_banner -loglevel error -fflags +genpts -i pipe:0 -map 0:v:0 -map 0:a:0? -vf bwdif=0:-1:1,crop=704:464:8:8 -c:v libx264 -preset veryfast -crf 22 -g 60 -pix_fmt yuv420p -c:a aac -ac 2 -b:a 160k -f mpegts pipe:1
+ffmpeg -hide_banner -loglevel error -fflags +genpts -analyzeduration 1000000 -probesize 5000000 -i pipe:0 -map 0:v:0 -map 0:a:0? -vf bwdif=0:-1:1,crop=704:464:8:8 -c:v libx264 -preset veryfast -crf 22 -g 60 -pix_fmt yuv420p -c:a aac -ac 2 -b:a 160k -f mpegts pipe:1
 ```
 
 **Even out loudness** between channels and adverts (EBU R128 target −23 LUFS).
 The video is copied:
 ```
-ffmpeg -hide_banner -loglevel error -fflags +genpts -i pipe:0 -map 0:v:0 -map 0:a:0? -c:v copy -af loudnorm=I=-23:TP=-2:LRA=11 -c:a aac -ac 2 -ar 48000 -b:a 160k -f mpegts pipe:1
+ffmpeg -hide_banner -loglevel error -fflags +genpts -analyzeduration 1000000 -probesize 5000000 -i pipe:0 -map 0:v:0 -map 0:a:0? -c:v copy -af loudnorm=I=-23:TP=-2:LRA=11 -c:a aac -ac 2 -ar 48000 -b:a 160k -f mpegts pipe:1
 ```
 
 **Low latency** for channel surfing. Expect bigger output at the same CRF:
 ```
-ffmpeg -hide_banner -loglevel error -fflags +genpts -i pipe:0 -map 0:v:0 -map 0:a:0? -vf bwdif=0:-1:1 -c:v libx264 -preset veryfast -tune zerolatency -crf 25 -g 30 -pix_fmt yuv420p -c:a aac -ac 2 -b:a 160k -f mpegts pipe:1
+ffmpeg -hide_banner -loglevel error -fflags +genpts -analyzeduration 1000000 -probesize 5000000 -i pipe:0 -map 0:v:0 -map 0:a:0? -vf bwdif=0:-1:1 -c:v libx264 -preset veryfast -tune zerolatency -crf 25 -g 30 -pix_fmt yuv420p -c:a aac -ac 2 -b:a 160k -f mpegts pipe:1
 ```
 
 **Matroska for a browser** (mime type `video/x-matroska`):
 ```
-ffmpeg -hide_banner -loglevel error -fflags +genpts -i pipe:0 -map 0:v:0 -map 0:a:0? -vf bwdif=0:-1:1 -c:v libx264 -preset veryfast -crf 25 -g 60 -pix_fmt yuv420p -c:a aac -ac 2 -b:a 160k -f matroska pipe:1
+ffmpeg -hide_banner -loglevel error -fflags +genpts -analyzeduration 1000000 -probesize 5000000 -i pipe:0 -map 0:v:0 -map 0:a:0? -vf bwdif=0:-1:1 -c:v libx264 -preset veryfast -crf 25 -g 60 -pix_fmt yuv420p -c:a aac -ac 2 -b:a 160k -f matroska pipe:1
 ```
 
 **Keep 5.1 surround** on digital channels by copying the AC-3 (Kodi, TVs, home
 theatres):
 ```
-ffmpeg -hide_banner -loglevel error -fflags +genpts -i pipe:0 -map 0:v:0 -map 0:a:0? -vf bwdif=0:-1:1 -c:v libx264 -preset veryfast -crf 25 -g 60 -pix_fmt yuv420p -c:a copy -f mpegts pipe:1
+ffmpeg -hide_banner -loglevel error -fflags +genpts -analyzeduration 1000000 -probesize 5000000 -i pipe:0 -map 0:v:0 -map 0:a:0? -vf bwdif=0:-1:1 -c:v libx264 -preset veryfast -crf 25 -g 60 -pix_fmt yuv420p -c:a copy -f mpegts pipe:1
 ```
 
 **Encode on the GPU (VAAPI).** This needs `/dev/dri` passed into the container.
 All on the GPU (decode, deinterlace, encode), it takes about a tenth of x264's CPU:
 ```
-ffmpeg -hide_banner -loglevel error -fflags +genpts -hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi -i pipe:0 -map 0:v:0 -map 0:a:0? -vf deinterlace_vaapi=auto=1 -c:v h264_vaapi -sei identifier+timing+recovery_point -qp 28 -g 60 -c:a copy -f mpegts pipe:1
+ffmpeg -hide_banner -loglevel error -fflags +genpts -analyzeduration 1000000 -probesize 5000000 -hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi -i pipe:0 -map 0:v:0 -map 0:a:0? -vf deinterlace_vaapi=auto=1 -c:v h264_vaapi -sei identifier+timing+recovery_point -qp 28 -g 60 -c:a copy -f mpegts pipe:1
 ```
 If your GPU can't deinterlace, deinterlace on the CPU and upload:
 `-vaapi_device /dev/dri/renderD128 -i pipe:0 … -vf bwdif=0:-1:1,format=nv12,hwupload -c:v h264_vaapi …`.
@@ -177,7 +179,7 @@ recordings, so a recording that is cut short stays playable.
    ```bash
    curl -s --max-time 10 -o sample.ts 'http://localhost:9981/stream/channelnumber/4.1?profile=pass'
    docker cp sample.ts tvheadend:/tmp/
-   docker exec -u abc tvheadend sh -c 'ffmpeg -hide_banner -loglevel error -fflags +genpts -i pipe:0 … -f mpegts pipe:1 < /tmp/sample.ts > /tmp/out.ts; echo rc=$?'
+   docker exec -u abc tvheadend sh -c 'ffmpeg -hide_banner -loglevel error -fflags +genpts -analyzeduration 1000000 -probesize 5000000 -i pipe:0 … -f mpegts pipe:1 < /tmp/sample.ts > /tmp/out.ts; echo rc=$?'
    docker exec tvheadend ffprobe -v error -show_entries stream=codec_name,width,height,display_aspect_ratio,avg_frame_rate,channels -of compact /tmp/out.ts
    ```
    Errors appear here, where TVHeadend would hide them. Lines like `Invalid

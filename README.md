@@ -996,6 +996,11 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
   of a Python traceback.
 - **`examples/analog-check`** checks one channel that carries a real analog picture
   from end to end, and leaves a report of pictures and fixture files (§14).
+- **Stream profiles start ~4 s sooner.** Each spawn profile's ffmpeg analysed ~5 s of
+  TVHeadend's stream before encoding. Bounded to 1 s (5 MB cap): through TVHeadend on the
+  HVR-1950, analog profiles now send their first byte in 0.6–1.0 s (was ~4.6 s) and
+  `digital-h264-aac-mpegts` in ~1.4 s. Re-run `tvh-stream-profiles` to update existing
+  profiles.
 
 ---
 

@@ -256,9 +256,17 @@ def variants(p):
     return p.get("variants") or [{"label": "", "pre": "", "vf": p["vf"], "venc": p["venc"]}]
 
 
+# ffmpeg's default stream analysis reads ~5 s of TVHeadend's stream before encoding
+# anything, which delays every channel start. 1 s finds the video size and the audio on
+# analog and on 1080i/720p/480i ATSC alike (measured: analog 4.7 -> 0.7 s, digital
+# 5.6 -> 0.9-4.0 s; the rest is the wait for the station's next keyframe). 5 MB is just a
+# cap that leaves a full second even at HD bitrates.
+PROBE = "-analyzeduration 1000000 -probesize 5000000"
+
+
 def spawn_cmdline(p, v, dev):
     pre = v["pre"].format(dev=dev)
-    cmd = (f"ffmpeg -hide_banner -loglevel error -fflags +genpts {pre} -i pipe:0 "
+    cmd = (f"ffmpeg -hide_banner -loglevel error -fflags +genpts {PROBE} {pre} -i pipe:0 "
            f"-map 0:v:0 -map 0:a:0? -vf {v['vf']} {v['venc']} {p['aenc']} -f {p['fmt']} pipe:1")
     cmd = " ".join(cmd.split())
     # SVT-AV1 prints a banner on stderr, which TVHeadend logs as errors. TVHeadend runs

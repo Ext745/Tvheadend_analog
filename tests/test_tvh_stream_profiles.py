@@ -251,6 +251,17 @@ class SpawnCommands(unittest.TestCase):
                     self.assertNotIn('"', cmd)
                     self.assertNotIn("{dev}", cmd)
 
+    def test_bounded_stream_analysis_on_every_variant(self):
+        # Default analysis (~5 s) delayed every channel start; it must precede -i to apply.
+        for p in prof.SPAWN:
+            for v in prof.variants(p):
+                with self.subTest(p["name"], variant=v["label"]):
+                    cmd = prof.spawn_cmdline(p, v, "/dev/dri/renderD128").split()
+                    i = cmd.index("-analyzeduration")
+                    self.assertEqual(cmd[i:i + 4], ["-analyzeduration", "1000000",
+                                                    "-probesize", "5000000"])
+                    self.assertLess(i, cmd.index("-i"))
+
     def test_vaapi_all_gpu_command(self):
         p = next(p for p in prof.SPAWN if p["name"] == "analog-h264-vaapi-720p60")
         cmd = prof.spawn_cmdline(p, prof.variants(p)[0], "/dev/dri/renderD129")
