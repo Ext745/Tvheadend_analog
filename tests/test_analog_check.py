@@ -80,7 +80,7 @@ class Run(unittest.TestCase):
         self.fake = FakeV4L2()
         self.stream = mock.Mock()
         for target, attr, value in ((ntsc, "run", self.fake),
-                                    (ntsc, "load_config", lambda: dict(self.cfg)),
+                                    (ntsc, "load_config", lambda card=None: dict(self.cfg)),
                                     (ntsc, "capture_gray", self.capture),
                                     (ac, "find_ntsc", lambda arg: "/fake/ntsc-tvh"),
                                     (ac, "load_ntsc", lambda path: ntsc),

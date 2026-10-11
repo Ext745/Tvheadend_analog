@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # analog-check - one-shot check of a channel that carries a real analog picture
 #
-#   analog-check CHANNEL [--empty CH,CH | --no-empty] [--out DIR] [--seconds 8]
+#   analog-check CHANNEL [--card NAME] [--empty CH,CH | --no-empty] [--out DIR] [--seconds 8]
 #                [--tvh http://host:9981 --tvh-channel NAME [--profiles 'analog-*']
 #                 [--user U --password P]]
 #
@@ -214,9 +214,10 @@ def _quiet_tune(n, cfg, chan, rep):
 
 
 # ---------------------------------------------------------------- streaming ------------- #
-def check_stream(ntsc_path, chan, seconds, rep, out):
+def check_stream(ntsc_path, chan, seconds, rep, out, card=None):
     clip = os.path.join(out, f"stream-{safe(chan['id'])}.ts")
-    p = subprocess.Popen([ntsc_path, "stream", chan["id"]], stdout=subprocess.PIPE,
+    p = subprocess.Popen([ntsc_path, *(["--card", card] if card else []), "stream", chan["id"]],
+                         stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE)
     try:
         data, ttfb = read_for(p.stdout, seconds)
@@ -316,6 +317,7 @@ def main(argv=None):
     ap.add_argument("--no-empty", action="store_true", help="skip the empty-channel check")
     ap.add_argument("--out", help="report directory (default ./analog-check-<time>)")
     ap.add_argument("--seconds", type=float, default=8, help="seconds per stream (default 8)")
+    ap.add_argument("--card", help="a card from /etc/ntsc-tvh.d/NAME.conf (ntsc-tvh --card)")
     ap.add_argument("--ntsc-tvh", help="path to ntsc-tvh (default: next to examples/, or PATH)")
     ap.add_argument("--tvh", help="TVHeadend URL, e.g. http://localhost:9981")
     ap.add_argument("--tvh-channel", help="TVHeadend channel name carrying CHANNEL")
@@ -328,8 +330,8 @@ def main(argv=None):
 
     ntsc_path = find_ntsc(args.ntsc_tvh)
     n = load_ntsc(ntsc_path)
-    cfg = n.load_config()
     try:
+        cfg = n.load_config(args.card)
         chan = n.parse_channel(args.channel)
         empties = ([] if args.no_empty else
                    [n.parse_channel(c.strip()) for c in args.empty.split(",") if c.strip()]
@@ -354,7 +356,7 @@ def main(argv=None):
     # tells you the problem is the signal, not the streaming. A device/tuning error does.
     blocked = any(r["step"] in ("device", "tune") for r in rep.failed)
     if not blocked:
-        check_stream(ntsc_path, chan, args.seconds, rep, out)
+        check_stream(ntsc_path, chan, args.seconds, rep, out, args.card)
     if args.tvh and not blocked:
         check_profiles(Tvh(args.tvh, args.user, args.password), args.tvh_channel,
                        args.profiles, args.seconds, rep, out)

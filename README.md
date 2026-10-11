@@ -739,6 +739,39 @@ a `# comment` after whitespace is ignored. The most useful:
 | `INPUTS_ALWAYS_ACTIVE` | `1`                              | list composite/svideo as channels         |
 | `SELF_PATH`            | *(auto)*                         | path written into M3U pipe:// URLs         |
 
+### More than one card
+
+Each tuner can stream one channel at a time, so two cards give you two channels at
+once. Give the second card a name and a file `/etc/ntsc-tvh.d/NAME.conf` with at
+least its `DEVICE`, then pass `--card NAME` to any command:
+
+```bash
+# /etc/ntsc-tvh.d/800e.conf
+DEVICE=/dev/video1
+
+ntsc-tvh --card 800e doctor
+ntsc-tvh --card 800e scan          # or: ntsc-tvh --card 800e m3u  (line inputs only)
+```
+
+- The card file is read after `/etc/ntsc-tvh.conf` and the environment, so it wins.
+  Any other key can go in it too (`RAW_AUDIO_DEV`, `SCAN_TABLES`, ...).
+- Its state, playlist and tuner lock live in `/var/lib/ntsc-tvh/NAME/` unless the
+  file sets `STATE_FILE`, `M3U_FILE` or `LOCK_FILE`. The cards never share a lock, so
+  both can stream at once; each card's own stream/scan still exclude each other.
+- Its playlist's URLs carry the card (`pipe:///usr/local/bin/ntsc-tvh --card 800e
+  stream input:composite`) and its channels are labelled `Composite In (800e)`. The
+  first card needs no name: without `--card` nothing changes, URLs included.
+- `install-timer` installs `ntsc-tvh-scan-NAME.timer` for a named card.
+- In TVHeadend, add a second **IPTV Automatic Network** whose URL is
+  `file:///var/lib/ntsc-tvh/NAME/ntsc.m3u`, with **Maximum # input streams = 1** like
+  the first one (one stream per tuner). Then scan it once, which creates the services,
+  and map them to channels.
+- In Docker, mount the folder: `- /home/docker/stacks/tvheadend/ntsc-tvh.d:/etc/ntsc-tvh.d:ro`,
+  and map both video devices (by `/dev/v4l/by-id/...` so a replug doesn't swap them).
+
+Tested with an HVR-1950 (no name) and an 800e (`--card 800e`) in one container: both
+streamed through TVHeadend at the same time, each under its own lock.
+
 ---
 
 ## 11. Troubleshooting
@@ -1014,6 +1047,9 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
   encoder sent nothing (seen in testing: firmware2 failing on an xHCI port). It now captures
   four frames like `stream` does and fails if none arrive, or reports picture / flat
   screen / snow.
+- **More than one card (`--card NAME`).** A second tuner gets its own config file,
+  state, playlist, tuner lock, timer and TVHeadend network, so both cards can stream
+  at once (§10). Setups with one card are unchanged, URLs included.
 - **New default scan method `auto`.** `signal` (the old default) finds nothing on
   cards that always read 0 %, like the 800e; `video` is right everywhere but grabs
   frames on every channel. `auto` judges the picture like `video` and skips the frame

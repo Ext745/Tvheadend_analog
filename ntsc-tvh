@@ -86,28 +86,58 @@ DEFAULTS = {
 }
 
 CONF_PATH = "/etc/ntsc-tvh.conf"
+CARD_DIR = "/etc/ntsc-tvh.d"            # --card NAME reads CARD_DIR/NAME.conf
+CARD_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+PER_CARD = ("STATE_FILE", "M3U_FILE", "LOCK_FILE")
 
 
-def load_config():
+def _read_conf(path, cfg):
+    """Apply KEY=VALUE lines from `path` to cfg; return the keys it set."""
+    seen = set()
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            v = re.sub(r"\s+#.*$", "", v)   # inline "  # comment" (a '#' inside a value is kept)
+            v = v.strip().strip('"').strip("'")
+            if k in cfg:
+                cfg[k] = v
+                seen.add(k)
+    return seen
+
+
+def load_config(card=None):
+    """DEFAULTS < /etc/ntsc-tvh.conf < environment < /etc/ntsc-tvh.d/CARD.conf.
+
+    With a card (a second tuner, say), its file sets at least DEVICE, and its state,
+    playlist and tuner lock move to <state dir>/CARD/ unless the file names them, so
+    two cards never share a lock or overwrite each other's channel list."""
     cfg = dict(DEFAULTS)
     if os.path.isfile(CONF_PATH):
         try:
-            with open(CONF_PATH) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    k, v = line.split("=", 1)
-                    k = k.strip()
-                    v = re.sub(r"\s+#.*$", "", v)   # inline "  # comment" (a '#' inside a value is kept)
-                    v = v.strip().strip('"').strip("'")
-                    if k in cfg:
-                        cfg[k] = v
+            _read_conf(CONF_PATH, cfg)
         except OSError as exc:
             print(f"warning: could not read {CONF_PATH}: {exc}", file=sys.stderr)
     for k in cfg:
         if k in os.environ:
             cfg[k] = os.environ[k]
+    if card is None:
+        return cfg
+    if not CARD_NAME.match(card):
+        raise ChannelError(f"card name '{card}': use lowercase letters, digits, '-' or '_'")
+    path = os.path.join(CARD_DIR, f"{card}.conf")
+    try:
+        seen = _read_conf(path, cfg)
+    except OSError as exc:
+        raise ChannelError(f"card '{card}': can't read {path} ({exc.strerror}); "
+                           f"create it with at least DEVICE=/dev/videoN")
+    for k in PER_CARD:
+        if k not in seen:
+            cfg[k] = os.path.join(os.path.dirname(cfg[k]), card, os.path.basename(cfg[k]))
+    cfg["CARD"] = card
     return cfg
 
 
@@ -848,17 +878,28 @@ def m3u_entries(cfg, state):
             yield parse_channel(f"input:{name}")
 
 
-def write_m3u(cfg, state):
+def self_cmd(cfg):
+    """How the M3U / timer call this script: with --card for a named card."""
     sp = self_path(cfg)
+    return f"{sp} --card {cfg['CARD']}" if cfg.get("CARD") else sp
+
+
+def write_m3u(cfg, state):
+    cmd = self_cmd(cfg)
+    card = cfg.get("CARD")
     lines = ["#EXTM3U"]
     for c in m3u_entries(cfg, state):
         cid = c["id"]
         label = c.get("label", cid)
         group = c.get("group", "NTSC")
+        if card:                    # tell the cards' channels apart in TVHeadend
+            label, tvg = f"{label} ({card})", f"{card}/{cid}"
+        else:
+            tvg = cid
         # The pipe URL IS the mux identity in TVHeadend's auto-network -> keep it
         # stable (no scan timestamps / volatile params) so rescans don't churn muxes.
-        url = f"pipe://{sp} stream {cid}"
-        lines.append(f'#EXTINF:-1 tvg-id="{cid}" tvg-name="{label}" group-title="{group}",{label}')
+        url = f"pipe://{cmd} stream {cid}"
+        lines.append(f'#EXTINF:-1 tvg-id="{tvg}" tvg-name="{label}" group-title="{group}",{label}')
         lines.append(url)
     os.makedirs(os.path.dirname(cfg["M3U_FILE"]), exist_ok=True)
     tmp = cfg["M3U_FILE"] + ".tmp"
@@ -937,7 +978,9 @@ def cmd_status(cfg, args):
               f"method={state.get('method')} threshold={state.get('threshold')}%")
         print(f"tables:     {', '.join(state.get('tables', []))}")
         print(f"active:     {len(state.get('active', []))} channel(s)")
-    print(f"timer:      {timer_status()}")
+    if cfg.get("CARD"):
+        print(f"card:       {cfg['CARD']}  (state in {os.path.dirname(cfg['STATE_FILE'])})")
+    print(f"timer:      {timer_status(cfg)}")
 
 
 CAPTURE_TEST_FRAMES = 4
@@ -1017,30 +1060,36 @@ def cmd_doctor(cfg, args):
 # --------------------------------------------------------------------------- #
 #  systemd timer for periodic rescan
 # --------------------------------------------------------------------------- #
-SERVICE_UNIT = "/etc/systemd/system/ntsc-tvh-scan.service"
-TIMER_UNIT = "/etc/systemd/system/ntsc-tvh-scan.timer"
+UNIT_DIR = "/etc/systemd/system"
 
 
-def timer_status():
-    if not os.path.exists(TIMER_UNIT):
+def unit_name(cfg):
+    return f"ntsc-tvh-scan-{cfg['CARD']}" if cfg.get("CARD") else "ntsc-tvh-scan"
+
+
+def timer_status(cfg):
+    if not os.path.exists(os.path.join(UNIT_DIR, unit_name(cfg) + ".timer")):
         return "not installed (rescan = none)"
-    r = run(["systemctl", "is-enabled", "ntsc-tvh-scan.timer"])
+    r = run(["systemctl", "is-enabled", unit_name(cfg) + ".timer"])
     return f"installed, {r.stdout.strip() or 'unknown'} (daily rescan)"
 
 
 def cmd_install_timer(cfg, args):
     if os.geteuid() != 0:
         sys.exit("install-timer must be run as root (sudo)")
+    name = unit_name(cfg)
+    service_unit = os.path.join(UNIT_DIR, name + ".service")
+    timer_unit = os.path.join(UNIT_DIR, name + ".timer")
     if args.period == "none":
-        for u in (TIMER_UNIT, SERVICE_UNIT):
+        for u in (timer_unit, service_unit):
             if os.path.exists(u):
                 os.remove(u)
-        run(["systemctl", "disable", "--now", "ntsc-tvh-scan.timer"])
+        run(["systemctl", "disable", "--now", name + ".timer"])
         run(["systemctl", "daemon-reload"])
         print("rescan timer removed (period = none)")
         return
 
-    sp = self_path(cfg)
+    sp = self_cmd(cfg)
     user = args.user
     svc = f"""[Unit]
 Description=Rescan NTSC analog channels and refresh the TVHeadend playlist
@@ -1064,14 +1113,14 @@ RandomizedDelaySec=300
 [Install]
 WantedBy=timers.target
 """
-    with open(SERVICE_UNIT, "w") as fh:
+    with open(service_unit, "w") as fh:
         fh.write(svc)
-    with open(TIMER_UNIT, "w") as fh:
+    with open(timer_unit, "w") as fh:
         fh.write(tmr)
     run(["systemctl", "daemon-reload"])
-    run(["systemctl", "enable", "--now", "ntsc-tvh-scan.timer"])
-    print(f"installed daily rescan timer (runs as {user}); next run:")
-    r = run(["systemctl", "list-timers", "ntsc-tvh-scan.timer", "--no-pager"])
+    run(["systemctl", "enable", "--now", name + ".timer"])
+    print(f"installed daily rescan timer {name} (runs as {user}); next run:")
+    r = run(["systemctl", "list-timers", name + ".timer", "--no-pager"])
     print(r.stdout.strip() or "  (use `systemctl list-timers` to verify)")
 
 
@@ -1081,6 +1130,9 @@ WantedBy=timers.target
 def build_parser():
     p = argparse.ArgumentParser(prog="ntsc-tvh",
                                 description="Analog NTSC tuning/streaming/scanning for TVHeadend pipe:// muxes")
+    p.add_argument("--card", metavar="NAME",
+                   help="use the card configured in /etc/ntsc-tvh.d/NAME.conf (a second "
+                        "tuner); its state, playlist and lock live in <state dir>/NAME/")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("doctor", help="check device, codecs, permissions, and capture")
@@ -1135,9 +1187,9 @@ def build_parser():
 
 
 def main():
-    cfg = load_config()
     args = build_parser().parse_args()
     try:
+        cfg = load_config(args.card)
         args.func(cfg, args)
     except ChannelError as exc:
         sys.exit(f"error: {exc}")

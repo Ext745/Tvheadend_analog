@@ -46,6 +46,8 @@ services:
       #   (CAPTURE_VIA_CAT=1, LOCK_FILE in the state dir, SCAN_LOCK_WAIT=5). Mount this
       #   only to override something:
       # - /home/docker/stacks/tvheadend/ntsc-tvh.conf:/etc/ntsc-tvh.conf:ro
+      # a second card (`ntsc-tvh --card NAME`, README §10 "More than one card"):
+      # - /home/docker/stacks/tvheadend/ntsc-tvh.d:/etc/ntsc-tvh.d:ro
     ports:
       - 9981:9981
       - 9982:9982
