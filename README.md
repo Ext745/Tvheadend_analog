@@ -990,29 +990,53 @@ broadcasting has been switched off for digital. What still matters is the video:
 VCRs, camcorders, game consoles, set-top boxes and RF modulators from these
 countries put out NTSC-M.
 
-| Analog standard | Countries |
-|---|---|
-| NTSC-M | United States, Canada, Mexico, Philippines, Colombia, Peru, Venezuela, Taiwan, Chile, Guatemala, Ecuador, Bolivia, Dominican Republic, Honduras, Cuba, Nicaragua, Paraguay, El Salvador, Costa Rica, Panama, Trinidad and Tobago, Suriname, Myanmar, Cambodia, Jamaica, Barbados, Guam |
-| NTSC (no variant given) | South Korea, Haiti, Belize, Saint Lucia, Antigua and Barbuda |
-| NTSC / PAL-B | Greenland |
-| NTSC-J | Japan (listed as NTSC-M on that page; Japan's variant has no 7.5 IRE black setup and its own channel frequencies) |
+| Country | Analog standard | TVHeadend predefined mux list to pick |
+|---|---|---|
+| United States | NTSC-M | `us-ATSC-center-frequencies-8VSB` (antenna, see [§6c](#6c-atsc-digital-network-in-tvheadend--get-this-right-first)); cable: `us-Cable-Standard-center-frequencies-QAM256`, or the `-IRC`/`-HRC` one your cable system uses |
+| Canada | NTSC-M | `us-ATSC-center-frequencies-8VSB` (its header says "USA and Canada") |
+| Mexico | NTSC-M | none bundled: add muxes by hand |
+| Philippines | NTSC-M | none bundled: add muxes by hand |
+| Colombia | NTSC-M | `co-All` (DVB-T2, 6 MHz) |
+| Peru | NTSC-M | none bundled: add muxes by hand |
+| Venezuela | NTSC-M | none bundled: add muxes by hand |
+| Taiwan | NTSC-M | `tw-All` (DVB-T) |
+| Chile | NTSC-M | none bundled: add muxes by hand |
+| Guatemala | NTSC-M | none bundled: add muxes by hand |
+| Ecuador | NTSC-M | none bundled: add muxes by hand |
+| Bolivia | NTSC-M | none bundled: add muxes by hand |
+| Dominican Republic | NTSC-M | none bundled: add muxes by hand |
+| Honduras | NTSC-M | none bundled: add muxes by hand |
+| Cuba | NTSC-M | none bundled: add muxes by hand |
+| Nicaragua | NTSC-M | none bundled: add muxes by hand |
+| Paraguay | NTSC-M | none bundled: add muxes by hand |
+| El Salvador | NTSC-M | none bundled: add muxes by hand |
+| Costa Rica | NTSC-M | none bundled: add muxes by hand |
+| Panama | NTSC-M | none bundled: add muxes by hand |
+| Trinidad and Tobago | NTSC-M | none bundled: add muxes by hand |
+| Suriname | NTSC-M | none bundled: add muxes by hand |
+| Myanmar | NTSC-M | none bundled: add muxes by hand |
+| Cambodia | NTSC-M | none bundled: add muxes by hand |
+| Jamaica | NTSC-M | none bundled: add muxes by hand |
+| Barbados | NTSC-M | none bundled: add muxes by hand |
+| Guam | NTSC-M | none bundled: add muxes by hand |
+| South Korea | NTSC | antenna: none bundled: add muxes by hand; cable: `kr-Cable-8VSB` |
+| Haiti | NTSC | none bundled: add muxes by hand |
+| Belize | NTSC | none bundled: add muxes by hand |
+| Saint Lucia | NTSC | none bundled: add muxes by hand |
+| Antigua and Barbuda | NTSC | none bundled: add muxes by hand |
+| Greenland | NTSC / PAL-B | none bundled: add muxes by hand |
+| Japan | NTSC-J (listed as NTSC-M on that page; no 7.5 IRE black setup, own channel frequencies) | none bundled: add muxes by hand |
 
 Not NTSC, despite being in the Americas: Brazil (PAL-M), Argentina and Uruguay
 (PAL-N).
 
-**Digital channels in TVHeadend** use the country's *digital* system, which isn't tied to
-its old analog one. The predefined mux lists TVHeadend ships (from LinuxTV's
-dtv-scan-tables, in the linuxserver build: `/usr/share/tvheadend/data/dvb-scan/`) cover
-only a few of these countries:
-
-| Country | Predefined list to pick | System (per the file) |
-|---|---|---|
-| United States | `us-ATSC-center-frequencies-8VSB` (antenna, see [§6c](#6c-atsc-digital-network-in-tvheadend--get-this-right-first)); cable: `us-Cable-Standard-center-frequencies-QAM256` (or the `-IRC`/`-HRC` one your cable plant uses) | ATSC / clear QAM |
-| Canada | `us-ATSC-center-frequencies-8VSB` (its header says "USA and Canada"); `ca-ON-Toronto` and `ca-AB-Calgary` are old local scans | ATSC |
-| South Korea | only `kr-Cable-8VSB`, which is for cable | DVB-C Annex B (cable) |
-| Colombia | `co-All` | DVB-T2, 6 MHz |
-| Taiwan | `tw-All` (or `auto-Taiwan`) | DVB-T |
-| Everyone else in the table above, Japan included | none: add the muxes by hand from a local frequency list | — |
+**The mux list column is for TVHeadend's digital channels** (*Configuration → DVB Inputs
+→ Networks → Add*, then **Pre-defined muxes**). Digital TV uses each country's digital
+system, not its old analog one, so the list is picked per country, not per analog
+standard. It names the files this TVHeadend build ships (LinuxTV's dtv-scan-tables, in
+`/usr/share/tvheadend/data/dvb-scan/`); pick one, never two (§6c). Where it says **none
+bundled**, create the network with no predefined muxes and add them under *Muxes* from
+the country's official channel/frequency list.
 
 What this means for ntsc-tvh:
 - **Composite and S-Video inputs** work with NTSC-M video from any of these countries.
