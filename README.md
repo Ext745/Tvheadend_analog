@@ -14,6 +14,11 @@ tune + a remux to MPEG-TS, with **no software video encoding and no separate
 audio capture**. The tool auto-detects raw-frame cards (e.g. HVR-950Q) and falls
 back to software encoding for them.
 
+> **Setting up digital (ATSC) channels in TVHeadend too? Read [§6c](#6c-atsc-digital-network-in-tvheadend--get-this-right-first) first.**
+> Pick only the predefined mux list **"us-ATSC-center-frequencies-8VSB"** (no date in
+> the name). Adding a second, dated list gives every station duplicate muxes plus
+> dozens of dead ones, and the guide (EPG) then barely fills.
+
 ---
 
 ## 1. How it fits together
@@ -590,6 +595,42 @@ Implementation notes:
 
 ---
 
+## 6c. ATSC (digital) network in TVHeadend — get this right first
+
+This is about TVHeadend's own digital tuning, not ntsc-tvh, but it's easy to get wrong
+and hard to spot afterwards.
+
+**1. Pick exactly one predefined mux list: `us-ATSC-center-frequencies-8VSB`.** When you
+create the ATSC network, TVHeadend offers several US lists (they come from LinuxTV's
+dtv-scan-tables). The undated one is the current band, RF 2–36. The dated ones
+(`-062009`, `-072020`) list the band as it was before channels were cleared, up to
+RF 51; their own headers say so. Don't add them.
+
+**2. Never add a second list to the same network.** TVHeadend only merges muxes on
+identical frequencies. The current list uses whole MHz (497.000 MHz), the dated ones
+add the pilot offset (497.028615 MHz), so each station gets two muxes. Both scan, both
+get services, only one gets channels. To rescan later, use **Force scan** on the
+network, not another list.
+
+**3. After the first scan, disable (or delete) the muxes that failed.** A mux with
+scan result FAIL and no services does nothing except slow every later scan and guide
+grab.
+
+**4. Guide data: enable the PSIP grabber, not EIT, and shorten the OTA timeout.** Under
+*Configuration → Channel/EPG → EPG Grabber Modules*, enable **Over-the-air: PSIP: ATSC
+Grabber** (EIT is the European/DVB one). Under *EPG Grabber*, set the **OTA timeout** to
+about **120 s**: the PSIP grabber never reports a mux as complete, so with the default
+600 s each mux holds the tuner for 10 minutes. PSIP itself delivers in under a minute.
+
+What happened on the test setup that taught us this: one ATSC network had both lists,
+so 81 muxes for 12 stations (62 failed, 7 duplicates). The scheduled guide grab sat
+10 minutes on each dead mux and filled nothing. With the junk disabled, 13 muxes
+remained, and with PSIP on and a 120 s timeout one minute on a single station gave 96
+guide entries.
+
+On a hybrid card that shares its tuner between analog and digital (the 800e), a
+scheduled guide grab can retune it under an analog stream; see §11.
+
 ## 7. Scanning
 
 ```bash
@@ -1053,6 +1094,9 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
   encoder sent nothing (seen in testing: firmware2 failing on an xHCI port). It now captures
   four frames like `stream` does and fails if none arrive, or reports picture / flat
   screen / snow.
+- **§6c: setting up the ATSC network in TVHeadend.** Use only the current US mux list,
+  never two lists in one network, disable failed muxes, PSIP (not EIT) for the guide,
+  and a 120 s OTA timeout. Learned from a test setup whose guide stayed empty.
 - **More than one card (`--card NAME`).** A second tuner gets its own config file,
   state, playlist, tuner lock, timer and TVHeadend network, so both cards can stream
   at once (§10). Setups with one card are unchanged, URLs included.
