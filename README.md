@@ -112,7 +112,8 @@ HVR-1950 behaviour seen in testing (kernel 7.0):
   gets an I/O error.
 - With no signal it shows **snow** rather than a blank screen, and the xc3028
   reports **0 %** signal on every channel unless it locks onto an analog
-  carrier. Use `SCAN_METHOD=video` (see §7).
+  carrier, even on a real picture. The default `SCAN_METHOD=auto` handles that
+  (see §7); `signal` finds nothing on this card.
 - Without `xc3028-v27.fw` the tuner silently stays at 0 MHz (see §11). The
   kernel's `extract_xc3028.pl` names a download that no longer exists:
   `steventoth.net` now serves an unrelated site. A prebuilt copy is in LibreELEC's
@@ -603,9 +604,15 @@ live viewer: by default it **aborts immediately if the tuner is busy**
 
 ### Detection methods — and the honest caveats
 
-Analog "is this channel live?" is inherently fuzzy. Three strategies:
+Analog "is this channel live?" is inherently fuzzy. Four strategies:
 
-- **`signal`** (default) — reads the tuner's signal-strength % via
+- **`auto`** (default) — the `video` test below, sped up on cards that report
+  signal: once any channel has read above 0 %, channels reading exactly 0 % are
+  skipped without grabbing frames. Cards that never report signal (the 800e) get
+  the full picture check on every channel; weak channels (a few %) are still
+  checked. On the HVR-1950 with one live channel in us-bcast it found the same
+  channel as `signal` and `video`.
+- **`signal`** — reads the tuner's signal-strength % via
   `v4l2-ctl --get-tuner` and thresholds it. Fast (a few minutes for a full cable
   walk). **Caveat:** the strength figure from these tuners (tda18271 on the
   HVR-1950) is coarse and not calibrated; a strong-but-unmodulated carrier can
@@ -645,10 +652,10 @@ Analog "is this channel live?" is inherently fuzzy. Three strategies:
   check for one channel.
 - **`both`** — require signal AND a picture. Fewest false positives, slowest.
 
-Recommendation: start with `signal` and a threshold you calibrate against two or
-three channels you *know* are live (`ntsc-tvh signal us-cable:23`), then switch to
-`both` if you get false positives. On the 800e the signal figure stays at 0 % even
-on a real picture, so use `video` there. There is no magic here — it's a heuristic, and
+Recommendation: keep `auto`. Use `signal` only for the fastest walk on a card whose
+signal figure you trust, with a threshold calibrated against two or three channels
+you *know* are live (`ntsc-tvh signal us-cable:23`); on the 800e the figure stays at
+0 % even on a real picture, so `signal` finds nothing there. There is no magic here — it's a heuristic, and
 the tool is explicit about that rather than pretending otherwise.
 
 ---
@@ -726,7 +733,7 @@ a `# comment` after whitespace is ignored. The most useful:
 | `SCAN_MOTION_MAX`      | `0.9`                            | video scan: max frame-to-frame change of a picture |
 | `DVB_GUARD`            | `1`                              | refuse analog while the same tuner's DVB side is busy |
 | `SCAN_TABLES`          | `us-bcast,us-cable`              | plans walked by `scan`                    |
-| `SCAN_METHOD`          | `signal`                        | `signal`/`video`/`both`                   |
+| `SCAN_METHOD`          | `auto`                          | `auto`/`signal`/`video`/`both` (§7)       |
 | `SCAN_THRESHOLD`       | `35`                             | signal % cutoff                           |
 | `SCAN_LOCK_WAIT`       | `5`                              | seconds to wait for the tuner lock        |
 | `INPUTS_ALWAYS_ACTIVE` | `1`                              | list composite/svideo as channels         |
@@ -838,8 +845,9 @@ ship. `dmesg` shows `Could not load firmware xc3028-v27.fw`. Composite and S-Vid
 still work without it. `scan` aborts on this error and keeps the previous
 state/M3U, so it never saves an empty channel list.
 
-**`signal` always reads 0%.** Some driver/tuner combos don't populate the field.
-Switch `SCAN_METHOD=video` (or `both`) and lean on the picture heuristic.
+**`signal` always reads 0%.** Some driver/tuner combos don't populate the field
+(the 800e's xc3028 + tvp5150 among them). Use `SCAN_METHOD=auto` (the default) or
+`video`, which judge the picture.
 
 **No audio / wrong audio.** On the HVR-1950 audio is baked into the MPEG-2 PS;
 `AUDIO_CODEC=copy` is correct. Switch to `ac3` only if a downstream player
@@ -1006,6 +1014,10 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
   encoder sent nothing (seen in testing: firmware2 failing on an xHCI port). It now captures
   four frames like `stream` does and fails if none arrive, or reports picture / flat
   screen / snow.
+- **New default scan method `auto`.** `signal` (the old default) finds nothing on
+  cards that always read 0 %, like the 800e; `video` is right everywhere but grabs
+  frames on every channel. `auto` judges the picture like `video` and skips the frame
+  grab on 0 % channels once the card has shown it reports signal.
 - **Stream profiles start ~4 s sooner.** Each spawn profile's ffmpeg analysed ~5 s of
   TVHeadend's stream before encoding. Bounded to 1 s (5 MB cap): through TVHeadend on the
   HVR-1950, analog profiles now send their first byte in 0.6–1.0 s (was ~4.6 s) and

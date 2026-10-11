@@ -259,6 +259,7 @@ class CmdScan(unittest.TestCase):
 
     def scan(self, tables="us-bcast", method=None, threshold=None, dwell=None, wait=None,
              no_m3u=False, **cfg):
+        cfg.setdefault("SCAN_METHOD", "signal")     # these tests walk the signal path
         self.cfg = make_cfg(self.tmp.name, **cfg)
         args = argparse.Namespace(tables=tables, method=method, threshold=threshold,
                                   dwell=dwell, wait=wait, no_m3u=no_m3u)
@@ -296,6 +297,36 @@ class CmdScan(unittest.TestCase):
         self.assertEqual([c["id"] for c in state["active"]],
                          ["us-cable:4", "us-cable:7", "us-cable:23",
                           "us-bcast:4", "us-bcast:7"])
+
+    def auto_scan(self, reports_signal):
+        """us-bcast with a picture on ch 4, 7 and 13; capture_gray counts its frame grabs."""
+        live = (67.25, 175.25, 211.25)
+        if not reports_signal:                     # e.g. the 800e: 0 % even on a picture
+            self.fake.signal_for = {}
+        grabs = []
+        def capture(cfg, info, frames=6):
+            grabs.append(self.fake.freq)
+            return fixture_bytes("colorbars-800e-ch4.gray" if self.fake.freq in live
+                                 else "black-hvr1950-ch12.gray")
+        with mock.patch.object(ntsc, "capture_gray", side_effect=capture):
+            state = self.scan(method="auto")
+        return [c["id"] for c in state["active"]], grabs
+
+    def test_auto_skips_zero_signal_channels_once_the_card_reports_signal(self):
+        self.fake.signal_for = {f: fixture("v4l2-get-tuner-locked.txt")
+                                for f in (67.25, 175.25, 211.25)}
+        found, grabs = self.auto_scan(reports_signal=True)
+        self.assertEqual(found, ["us-bcast:4", "us-bcast:7", "us-bcast:13"])
+        # ch 2 and 3 are grabbed (the card hasn't shown signal yet), then only signal > 0.
+        self.assertEqual(grabs, [55.25, 61.25, 67.25, 175.25, 211.25])
+
+    def test_auto_judges_every_channel_on_a_card_that_never_reports_signal(self):
+        found, grabs = self.auto_scan(reports_signal=False)
+        self.assertEqual(found, ["us-bcast:4", "us-bcast:7", "us-bcast:13"])
+        self.assertEqual(len(grabs), 68)
+
+    def test_auto_is_the_default(self):
+        self.assertEqual(ntsc.DEFAULTS["SCAN_METHOD"], "auto")
 
     def test_threshold_and_dwell_overrides(self):
         weak = "\tSignal strength/AFC  : 87%/-12\n"            # below the 90 % threshold

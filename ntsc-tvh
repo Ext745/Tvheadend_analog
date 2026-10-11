@@ -69,7 +69,9 @@ DEFAULTS = {
                                       #   Some ffmpeg builds never exit on SIGTERM with an ALSA input.
     # scanning --------------------------------------------------------------- #
     "SCAN_TABLES":   "us-bcast,us-cable",   # comma list scanned by default
-    "SCAN_METHOD":   "signal",        # signal | video | both
+    "SCAN_METHOD":   "auto",          # auto | signal | video | both. auto = judge the picture,
+                                      #   skipping 0 % channels once the card has shown it
+                                      #   reports signal (the 800e never does; HVR-1950 does)
     "SCAN_THRESHOLD": "35",           # signal-strength % threshold (signal/both)
     "SCAN_VAR_MIN":  "12",            # min luma std-dev for the video heuristic (rejects flat screens)
     "SCAN_NOISE_MAX": "0.60",         # video heuristic: max spatial noise ratio of a picture, and
@@ -737,16 +739,20 @@ def looks_like_picture(m, cfg):
             or (m["motion"] is not None and m["motion"] < float(cfg["SCAN_MOTION_MAX"])))
 
 
-def is_active(cfg, info, chan, method, thr):
+def is_active(cfg, info, chan, method, thr, card_reports_signal=False):
+    """method auto: judge the picture, but once the card has shown it reports signal
+    (card_reports_signal), skip the frame grab on channels reading exactly 0 %."""
     sig, afc = get_signal(cfg)
     sig_ok = (sig is not None and sig >= thr)
     if method == "signal":
         return sig_ok, {"signal": sig, "afc": afc}
+    if method == "auto" and card_reports_signal and sig == 0:
+        return False, {"signal": sig, "afc": afc}
     m = picture_metrics(capture_gray(cfg, info), float(cfg["SCAN_VAR_MIN"]))
     vid_ok = looks_like_picture(m, cfg)
     metrics = {"signal": sig, "afc": afc,
                **{k: (None if v is None else round(v, 2 if k != "var" else 1)) for k, v in m.items()}}
-    if method == "video":
+    if method in ("video", "auto"):
         return vid_ok, metrics
     return (sig_ok and vid_ok), metrics
 
@@ -774,13 +780,15 @@ def cmd_scan(cfg, args):
             set_standard(cfg)
             idx = resolve_input_index(cfg, "television")
             v4l2(cfg, f"--set-input={idx}")
+            reports = False             # auto: has the card shown it reports signal?
             for c in cands:
                 # A tuner that won't tune (or one the DVB side grabbed mid-scan) is a device
                 # fault, not an empty channel: abort, keeping the previous state/M3U.
                 check_dvb_idle(cfg, rf=True)
                 set_freq(cfg, c["freq"])
                 time.sleep(dwell)
-                active, metrics = is_active(cfg, info, c, method, thr)
+                active, metrics = is_active(cfg, info, c, method, thr, reports)
+                reports = reports or bool(metrics.get("signal"))
                 tag = "ACTIVE" if active else "  --  "
                 extra = " ".join(f"{k}={v}" for k, v in metrics.items() if v is not None)
                 sys.stderr.write(f"  [{tag}] {c['id']:<16} {c['freq']:>8.3f} MHz  {extra}\n")
@@ -1103,7 +1111,7 @@ def build_parser():
 
     sp = sub.add_parser("scan", help="scan channels and save active ones")
     sp.add_argument("--tables", help="comma list to scan (default from config)")
-    sp.add_argument("--method", choices=["signal", "video", "both"])
+    sp.add_argument("--method", choices=["auto", "signal", "video", "both"])
     sp.add_argument("--threshold", type=int, help="signal %% threshold")
     sp.add_argument("--dwell", type=float, help="settle seconds per channel")
     sp.add_argument("--wait", type=float, help="seconds to wait for tuner lock (0 = abort if busy)")
