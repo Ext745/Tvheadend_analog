@@ -68,6 +68,40 @@ sudo apt install v4l-utils ffmpeg          # Debian/Ubuntu
 
 ---
 
+## 2b. Tested hardware and references
+
+| | Hauppauge WinTV-HVR-1950 | Pinnacle PCTV HD Pro Stick (800e) |
+|---|---|---|
+| Status | production (Dell OptiPlex 3020, USB 2.0) | dev/test (workbench, Tiger Lake xHCI) |
+| Driver | `pvrusb2` | `em28xx` (card=17, em2882/3), USB `2304:0227` |
+| Analog path | hardware MPEG-2 encoder (cx23416) → remux, via `cat` | raw YUYV (tvp5150am1 decoder) → software MPEG-2 + ALSA |
+| Tuner / ATSC | single front-end; analog/DVB mutually exclusive | xc3028 tuner shared with an LGDT3303 ATSC demod; **not** exclusive (see §11) |
+| Firmware | `v4l-pvrusb2-73xxx-01.fw`, `v4l-cx25840.fw`, `v4l-cx2341x-enc.fw` | `xc3028-v27.fw` |
+| Audio | inside the MPEG-2 stream | ALSA card `Em28xxAudio` (auto-detected via sysfs) |
+
+800e behaviour seen in testing (kernel 7.0):
+- It powers up in **PAL** 720×576. `tune` switches it to NTSC 720×480.
+- It delivers ALSA **audio only while video is streaming**. `arecord` on its own
+  gets an I/O error.
+- With no signal it shows **snow** rather than a blank screen, and the xc3028
+  reports **0 %** signal on every channel unless it locks onto an analog
+  carrier. Use `SCAN_METHOD=video` (see §7).
+- Without `xc3028-v27.fw` the tuner silently stays at 0 MHz (see §11). The
+  kernel's `extract_xc3028.pl` names a download that no longer exists:
+  `steventoth.net` now serves an unrelated site. A prebuilt copy is in LibreELEC's
+  [dvb-firmware](https://github.com/LibreELEC/dvb-firmware/raw/master/firmware/xc3028-v27.fw)
+  repository (66 220 bytes, MD5 `293dc5e915d9a0f74a368f8a2ce3cc10`).
+
+References:
+- LinuxTV wiki: [Hardware device information](https://www.linuxtv.org/wiki/index.php/Hardware_device_information),
+  [Hauppauge WinTV-HVR-1950](https://www.linuxtv.org/wiki/index.php/Hauppauge_WinTV-HVR-1950),
+  [Pvrusb2](https://www.linuxtv.org/wiki/index.php/Pvrusb2). The wiki sits
+  behind a JavaScript bot check, so open it in a browser.
+- [pvrusb2 project page](http://www.isely.net/pvrusb2/pvrusb2.html) (Mike Isely,
+  driver maintainer).
+
+---
+
 ## 3. Install
 
 ```bash
@@ -309,12 +343,36 @@ Analog "is this channel live?" is inherently fuzzy. Three strategies:
   walk). **Caveat:** the strength figure from these tuners (tda18271 on the
   HVR-1950) is coarse and not calibrated; a strong-but-unmodulated carrier can
   read "active." Tune `SCAN_THRESHOLD` to your plant.
-- **`video`** — grabs a few frames and measures luma spread. The cx25840 decoder
-  emits a flat blue/black raster when it has no sync, so a near-zero spread
-  reliably means "no channel." **Caveat:** it can't distinguish a real picture
-  from analog *snow* (both have high spread), and it's slower (extra seconds per
-  channel). Good at killing dead channels, not at certifying live ones.
-- **`both`** — require signal AND non-flat video. Fewer false positives, slowest.
+- **`video`** — grabs six frames (3 s) and judges the picture on three measures:
+  - **contrast** (`var`, luma std-dev): rejects the flat blue/black raster a
+    decoder like the HVR-1950's cx25840 shows without sync.
+  - **spatial noise** (`noise`): difference between vertically adjacent pixels,
+    relative to contrast. Real images are locally smooth; snow is not. Only the
+    vertical direction is used: analog snow is streaked along the scan lines, so
+    it looks deceptively smooth horizontally.
+  - **motion** (`motion`): frame-to-frame change relative to contrast. Snow is new
+    every frame; most pictures change little in half a second.
+
+  A channel counts as live if it has contrast **and** is either smooth
+  (`noise < SCAN_NOISE_MAX`) or steady (`motion < SCAN_MOTION_MAX`). Snow fails
+  both. This matters on tuners that show snow rather than a blank screen, such
+  as the Pinnacle 800e (xc3028 + tvp5150). There the old contrast-only test
+  marked every empty channel live.
+
+  Calibration: 88 snow/noise samples from an 800e (two full 68-channel scans,
+  20 captures and its unconnected S-Video input) scored `noise` ≥ 0.67 and
+  `motion` ≥ 1.14. 16 live ATSC channels, downscaled the same way, all passed:
+  - the busiest moving picture scored `noise` 0.53
+  - pictures that needed the `motion` test scored ≤ 0.80
+  - a game-show board with a ring of bulb dots scored `noise` 0.81 but passed on
+    `motion` 0.12
+
+  The defaults (0.60 / 0.9) sit between the two groups. In simulation, very
+  noisy, fast-moving pictures (roughly σ ≥ 10 grey levels of added noise) can be
+  missed; calm ones survive σ 20–30+. Not yet checked
+  against real analog pictures. `scan` prints `var`, `noise` and `motion` for
+  every channel, so the thresholds can be tuned.
+- **`both`** — require signal AND a picture. Fewest false positives, slowest.
 
 Recommendation: start with `signal` and a threshold you calibrate against two or
 three channels you *know* are live (`ntsc-tvh signal us-cable:23`), then switch to
@@ -389,6 +447,9 @@ a `# comment` after whitespace is ignored. The most useful:
 | `VIDEO_BITRATE`        | *(driver default)*               | pin HW MPEG-2 bitrate, e.g. `6000000`     |
 | `CAPTURE_VIA_CAT`      | `1`                              | `1` = `cat dev \| ffmpeg` (reliable read; stream + video scan) |
 | `STOP_GRACE`           | `1`                              | seconds ffmpeg gets after SIGTERM before SIGKILL |
+| `SCAN_VAR_MIN`         | `12`                             | video scan: min contrast (rejects flat screens) |
+| `SCAN_NOISE_MAX`       | `0.60`                           | video scan: max spatial noise of a picture |
+| `SCAN_MOTION_MAX`      | `0.9`                            | video scan: max frame-to-frame change of a picture |
 | `SCAN_TABLES`          | `us-bcast,us-cable`              | plans walked by `scan`                    |
 | `SCAN_METHOD`          | `signal`                        | `signal`/`video`/`both`                   |
 | `SCAN_THRESHOLD`       | `35`                             | signal % cutoff                           |
@@ -432,6 +493,19 @@ EPG), which puts the single front-end in digital mode and denies the analog
 open. Either don't map `/dev/dvb` on this box, or disable the ATSC adapter **and
 the OTA EPG grabber** in TVHeadend when you want analog. One tuner can't expose
 both modes at once.
+
+**em28xx cards (Pinnacle 800e): analog + ATSC at once wedges the tuner until
+replug.** Unlike pvrusb2, em28xx does *not* refuse the second user. An analog
+stream started while TVHeadend had the DVB side tuned (an OTA EPG grab on one
+ATSC mux) left the stick's I2C bus wedged. `dmesg` filled with `lgdt330x ...
+i2c_read_demod_bytes ... error (ret == -6)`, TVHeadend logged `FE_READ_STATUS
+error No such device or address`, and every analog tune then failed with
+`tuner did not tune ... 0.000 MHz`. That persisted after TVHeadend was stopped
+and was only cleared by unplugging the stick. Composite/S-Video kept working.
+On a shared box, disable TVHeadend's OTA EPG grabbers (**Configuration → Channel
+/ EPG → EPG Grabber Modules**: the PSIP and EIT over-the-air modules) and
+**Force initial EPG grab at start-up**, and keep the ATSC network's idle scan
+off.
 
 **`PermissionError: [Errno 13] ... '/run/lock/ntsc-tvh.lock'`** (or any lock
 path). The user TVHeadend runs as can't create the lock file. The default
@@ -565,6 +639,10 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
   ntsc-tvh with `PR_SET_PDEATHSIG`, so TVHeadend's default SIGKILL still takes
   them down at once. ffmpeg still writes straight to TVHeadend's pipe and holds
   the tuner lock until it is gone.
+- **The video scan no longer mistakes snow for a channel.** It used to judge
+  contrast alone, so on tuners that show snow (the 800e) every empty channel
+  was "active". It now also checks spatial noise and frame-to-frame motion
+  (`SCAN_NOISE_MAX`, `SCAN_MOTION_MAX`; see §7).
 - **Quieter TVHeadend log.** The `ntsc-tvh: streaming …` status line is only
   printed when stderr is a terminal. TVHeadend logs every stderr line from a pipe
   at ERROR level, so each channel start used to show up as an error. Real errors

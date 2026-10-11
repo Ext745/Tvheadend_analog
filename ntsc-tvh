@@ -29,6 +29,7 @@ import re
 import shlex
 import shutil
 import signal
+import statistics
 import subprocess
 import sys
 import time
@@ -62,7 +63,10 @@ DEFAULTS = {
     "SCAN_TABLES":   "us-bcast,us-cable",   # comma list scanned by default
     "SCAN_METHOD":   "signal",        # signal | video | both
     "SCAN_THRESHOLD": "35",           # signal-strength % threshold (signal/both)
-    "SCAN_VAR_MIN":  "12",            # min luma std-dev for the video heuristic
+    "SCAN_VAR_MIN":  "12",            # min luma std-dev for the video heuristic (rejects flat screens)
+    "SCAN_NOISE_MAX": "0.60",         # video heuristic: max spatial noise ratio of a picture, and
+    "SCAN_MOTION_MAX": "0.9",         #   max frame-to-frame change ratio. Snow fails both; a real
+                                      #   picture passes at least one (see picture_metrics()).
     "SCAN_DWELL":    "1.2",           # seconds to let the tuner settle before measuring
     "SCAN_LOCK_WAIT": "5",            # seconds to wait for the tuner lock (0 = abort if busy).
                                       #   Small wait smooths brief contention (scan vs. live view).
@@ -535,9 +539,11 @@ def cmd_stream(cfg, args):
 # --------------------------------------------------------------------------- #
 #  Scanning
 # --------------------------------------------------------------------------- #
-def video_variance(cfg, info, frames=6):
-    """Grab a few gray frames and return the max per-frame luma std-dev.
-    Flat 'no signal' (forced blue/black) screens -> ~0; real pictures -> high."""
+FRAME_W, FRAME_H = 160, 120
+
+
+def capture_gray(cfg, info, frames=6):
+    """Grab `frames` gray 160x120 frames (2 per second) and return the raw bytes."""
     # Same input path as `stream`: on some ffmpeg builds the MPEG node read directly
     # is empty, which would make every channel look like a flat screen.
     via_cat = info["hw_encoder"] and cfg["CAPTURE_VIA_CAT"] == "1"
@@ -546,7 +552,7 @@ def video_variance(cfg, info, frames=6):
     else:
         src = ["-f", "v4l2", "-i", cfg["DEVICE"]]
     cmd = [cfg["FFMPEG"], "-hide_banner", "-loglevel", "error", *src,
-           "-an", "-vf", "fps=2,scale=160:120,format=gray",
+           "-an", "-vf", f"fps=2,scale={FRAME_W}:{FRAME_H},format=gray",
            "-frames:v", str(frames), "-f", "rawvideo", "pipe:1"]
     cat = (subprocess.Popen(["cat", cfg["DEVICE"]], stdout=subprocess.PIPE,
                             preexec_fn=_die_with_parent) if via_cat else None)
@@ -554,41 +560,78 @@ def video_variance(cfg, info, frames=6):
         r = subprocess.run(cmd, stdin=cat.stdout if cat else None,
                            capture_output=True, timeout=8)
     except subprocess.TimeoutExpired:
-        return 0.0
+        return b""
     finally:
         if cat:
             # cat never sees EOF on a capture node; stop it once ffmpeg has its frames.
             cat.kill()
             cat.wait()
             cat.stdout.close()
-    data = r.stdout
-    fsize = 160 * 120
-    best = 0.0
-    for i in range(0, len(data) - fsize + 1, fsize):
-        frame = data[i:i + fsize]
-        # mean / std-dev from a 256-bin histogram (fast, stdlib only)
-        hist = [0] * 256
-        for v in range(256):
-            hist[v] = frame.count(v)
-        n = sum(hist)
-        if n == 0:
+    return r.stdout
+
+
+def _std(frame):
+    # mean / std-dev from a 256-bin histogram (fast, stdlib only)
+    hist = [frame.count(v) for v in range(256)]
+    n = len(frame)
+    mean = sum(v * c for v, c in enumerate(hist)) / n
+    return (sum(c * (v - mean) ** 2 for v, c in enumerate(hist)) / n) ** 0.5
+
+
+def _rms_diff(a, b):
+    return (sum((x - y) ** 2 for x, y in zip(a, b)) / min(len(a), len(b))) ** 0.5
+
+
+def picture_metrics(data, var_min):
+    """Tell a picture from a flat screen and from snow, using gray frames from capture_gray().
+
+    var    max luma std-dev. Flat 'no signal' screens (forced blue/black) are ~0.
+    noise  median over frames with contrast (std >= var_min) of the difference between
+           vertically adjacent pixels relative to the frame's std-dev. Real images are
+           locally smooth; snow is not (>= 0.67 on an 800e). Vertical only: analog snow
+           is streaked along the lines, so it looks smooth horizontally.
+    motion median over consecutive frame pairs (both with contrast, duplicates skipped)
+           of the frame-to-frame difference relative to std-dev. Snow is new every frame
+           (>= 1.14); most pictures change little in half a second.
+    Calibrated on 88 snow/noise samples from an 800e (two 68-channel scans plus captures)
+    and 16 live ATSC channels: snow fails both tests, every picture passes at least one
+    (busiest moving picture: noise 0.53; steadiest-needed picture: motion 0.80)."""
+    fsize = FRAME_W * FRAME_H
+    frames = [data[i:i + fsize] for i in range(0, len(data) - fsize + 1, fsize)]
+    stds = [_std(f) for f in frames]
+    noise, motion = [], []
+    for i, (f, sd) in enumerate(zip(frames, stds)):
+        if sd < var_min:
             continue
-        mean = sum(v * c for v, c in enumerate(hist)) / n
-        var = sum(c * (v - mean) ** 2 for v, c in enumerate(hist)) / n
-        best = max(best, var ** 0.5)
-    return best
+        noise.append(_rms_diff(f, f[FRAME_W:]) / sd)
+        if i and stds[i - 1] >= var_min:
+            m = _rms_diff(f, frames[i - 1]) / sd
+            if m > 0.01:                         # the fps filter repeats frames now and then
+                motion.append(m)
+    return {"var": max(stds, default=0.0),
+            "noise": statistics.median(noise) if noise else None,
+            "motion": statistics.median(motion) if motion else None}
 
 
-def is_active(cfg, info, chan, method, thr, var_min):
+def looks_like_picture(m, cfg):
+    if m["var"] < float(cfg["SCAN_VAR_MIN"]) or m["noise"] is None:
+        return False
+    return (m["noise"] < float(cfg["SCAN_NOISE_MAX"])
+            or (m["motion"] is not None and m["motion"] < float(cfg["SCAN_MOTION_MAX"])))
+
+
+def is_active(cfg, info, chan, method, thr):
     sig, afc = get_signal(cfg)
     sig_ok = (sig is not None and sig >= thr)
     if method == "signal":
         return sig_ok, {"signal": sig, "afc": afc}
-    var = video_variance(cfg, info)
-    vid_ok = var >= var_min
+    m = picture_metrics(capture_gray(cfg, info), float(cfg["SCAN_VAR_MIN"]))
+    vid_ok = looks_like_picture(m, cfg)
+    metrics = {"signal": sig, "afc": afc,
+               **{k: (None if v is None else round(v, 2 if k != "var" else 1)) for k, v in m.items()}}
     if method == "video":
-        return vid_ok, {"signal": sig, "afc": afc, "var": round(var, 1)}
-    return (sig_ok and vid_ok), {"signal": sig, "afc": afc, "var": round(var, 1)}
+        return vid_ok, metrics
+    return (sig_ok and vid_ok), metrics
 
 
 def cmd_scan(cfg, args):
@@ -599,7 +642,6 @@ def cmd_scan(cfg, args):
             sys.exit(f"unknown table '{t}' (have: {', '.join(TABLES)})")
     method = (args.method or cfg["SCAN_METHOD"]).lower()
     thr = int(args.threshold if args.threshold is not None else cfg["SCAN_THRESHOLD"])
-    var_min = float(cfg["SCAN_VAR_MIN"])
     dwell = float(args.dwell if args.dwell is not None else cfg["SCAN_DWELL"])
     wait = float(args.wait if args.wait is not None else cfg["SCAN_LOCK_WAIT"])
 
@@ -619,7 +661,7 @@ def cmd_scan(cfg, args):
                 # (keeping the previous state/M3U) rather than save an empty scan.
                 set_freq(cfg, c["freq"])
                 time.sleep(dwell)
-                active, metrics = is_active(cfg, info, c, method, thr, var_min)
+                active, metrics = is_active(cfg, info, c, method, thr)
                 tag = "ACTIVE" if active else "  --  "
                 extra = " ".join(f"{k}={v}" for k, v in metrics.items() if v is not None)
                 sys.stderr.write(f"  [{tag}] {c['id']:<16} {c['freq']:>8.3f} MHz  {extra}\n")
