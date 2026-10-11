@@ -140,6 +140,14 @@ class PictureMetrics(unittest.TestCase):
         ok, m = self.judge(fixture_bytes("noise-800e-svideo-unconnected.gray"))
         self.assertFalse(ok, m)
 
+    def test_real_800e_colour_bars_are_a_picture(self):
+        # A real analog picture: an RF modulator's colour bars on us-bcast:4, 800e raw path.
+        # The first frames still show the sync settling (torn top third) and it still passes.
+        ok, m = self.judge(fixture_bytes("colorbars-800e-ch4.gray"))
+        self.assertTrue(ok, m)
+        self.assertLess(m["noise"], NOISE_MAX)
+        self.assertLess(m["motion"], MOTION_MAX)
+
     def test_real_hvr1950_no_signal_black_is_not_a_picture(self):
         # The HVR-1950's cx25843 shows black, not snow, without sync (here RF 12 with only
         # ATSC on air). Luma flickers 0..1, so it is not perfectly flat -- the contrast gate

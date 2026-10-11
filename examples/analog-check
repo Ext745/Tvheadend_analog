@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+# analog-check - one-shot check of a channel that carries a real analog picture
+#
+#   analog-check CHANNEL [--empty CH,CH | --no-empty] [--out DIR] [--seconds 8]
+#                [--tvh http://host:9981 --tvh-channel NAME [--profiles 'analog-*']
+#                 [--user U --password P]]
+#
+#   e.g.  docker exec -u abc tvheadend /opt/ntsc-tvh/examples/analog-check us-bcast:4
+#         docker exec -u abc -e DEVICE=/dev/video1 tvheadend analog-check input:composite \
+#             --tvh http://localhost:9981 --tvh-channel "Composite In"
+#
+# Run it where ntsc-tvh runs, with the same config/env (DEVICE, ...), when nothing else is
+# using the tuner. For CHANNEL it checks, in order:
+#   1. the device       driver, card, hardware encoder or raw frames
+#   2. tuning           the tuner reads back the frequency (ntsc-tvh's own check), signal %
+#   3. the video scan   CHANNEL must look like a picture, the --empty channels (default:
+#                       the RF neighbours) must not -- the same test `scan --method video` uses
+#   4. streaming        `ntsc-tvh stream CHANNEL`: time to first byte, the streams in it
+#   5. TVHeadend        optional: each matching stream profile on --tvh-channel
+# and writes everything to --out: summary.json, a still of each stream (.png), the scan's
+# 160x120 frames (.gray + .png contact sheet) and the raw `v4l2-ctl --get-tuner` output.
+# The .gray and get-tuner files are ready-made test fixtures (tests/fixtures/). Exits 1 if
+# any check fails. Standard library only (plus ffmpeg/ffprobe, which ntsc-tvh needs anyway).
+
+import argparse
+import fnmatch
+import importlib.machinery
+import importlib.util
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import urllib.parse
+import urllib.request
+from datetime import datetime
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def load_ntsc(path):
+    loader = importlib.machinery.SourceFileLoader("ntsc_tvh", path)
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("ntsc_tvh", loader))
+    dont_write = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        loader.exec_module(mod)
+    finally:
+        sys.dont_write_bytecode = dont_write
+    return mod
+
+
+def find_ntsc(arg):
+    for cand in (arg, os.path.join(os.path.dirname(HERE), "ntsc-tvh"), shutil.which("ntsc-tvh")):
+        if cand and os.path.isfile(cand):
+            return os.path.realpath(cand)
+    sys.exit("analog-check: can't find ntsc-tvh; pass --ntsc-tvh PATH")
+
+
+def default_empties(n, chan):
+    """The RF neighbours of a tuner channel (line inputs have none)."""
+    if chan["kind"] != "tuner":
+        return []
+    out = []
+    for ch in (chan["ch"] - 1, chan["ch"] + 1):
+        try:
+            out.append(n.parse_channel(f"{chan['table']}:{ch}"))
+        except n.ChannelError:
+            pass
+    return out
+
+
+class Report:
+    def __init__(self):
+        self.results = []
+
+    def add(self, step, name, ok, detail, **data):
+        self.results.append({"step": step, "name": name, "ok": ok, "detail": detail, **data})
+        mark = {True: "PASS", False: "FAIL", None: "info"}[ok]
+        print(f"  [{mark}] {step:9s} {name:28s} {detail}", flush=True)
+
+    @property
+    def failed(self):
+        return [r for r in self.results if r["ok"] is False]
+
+
+def safe(name):
+    return name.replace(":", "_").replace("/", "_").replace(" ", "_")
+
+
+def tool(cmd, **kw):
+    """Run ffmpeg/ffprobe; a missing tool just means no picture/stream details."""
+    try:
+        return subprocess.run(cmd, capture_output=True, **kw)
+    except OSError:
+        return subprocess.CompletedProcess(cmd, 127, stdout="" if kw.get("text") else b"")
+
+
+def ffprobe_streams(path):
+    r = tool(["ffprobe", "-v", "error", "-show_streams", "-of", "json", path], text=True)
+    try:
+        streams = json.loads(r.stdout or "{}").get("streams", [])
+    except ValueError:
+        streams = []
+    out = []
+    for s in streams:
+        if s.get("codec_type") == "video":
+            out.append(f"{s.get('codec_name')} {s.get('width')}x{s.get('height')} "
+                       f"{s.get('display_aspect_ratio', '?')} {s.get('field_order', '')}".strip())
+        elif s.get("codec_type") == "audio":
+            out.append(f"{s.get('codec_name')} {s.get('sample_rate')} Hz {s.get('channels')}ch")
+    return out
+
+
+def still(clip, png, at):
+    tool(["ffmpeg", "-v", "error", "-y", "-ss", str(at), "-i", clip, "-frames:v", "1", png])
+    return os.path.exists(png)
+
+
+def gray_sheet(n, data, png):
+    """The scan's frames side by side, so a person can see what it judged."""
+    frames = len(data) // (n.FRAME_W * n.FRAME_H)
+    if not frames:
+        return
+    tool(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "gray",
+          "-s", f"{n.FRAME_W}x{n.FRAME_H}", "-i", "pipe:0",
+          "-vf", f"tile={min(frames, 3)}x{(frames + 2) // 3}", "-frames:v", "1", png], input=data)
+
+
+def read_for(stream, seconds):
+    """Read a pipe for `seconds` after its first byte; return (bytes, time to first byte)."""
+    t0 = time.monotonic()
+    first = stream.read1(65536) if hasattr(stream, "read1") else stream.read(65536)
+    if not first:
+        return b"", None
+    ttfb = time.monotonic() - t0
+    buf = [first]
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        chunk = stream.read1(65536) if hasattr(stream, "read1") else stream.read(65536)
+        if not chunk:
+            break
+        buf.append(chunk)
+    return b"".join(buf), ttfb
+
+
+# ---------------------------------------------------------------- device checks ---------- #
+def check_device(n, cfg, rep):
+    info = n.device_info(cfg)
+    rep.add("device", cfg["DEVICE"], True,
+            f"{info['driver']} / {info['card']} / "
+            f"{'hardware MPEG' if info['hw_encoder'] else 'raw frames'}", info=info)
+    return info
+
+
+def check_tuning(n, cfg, chan, rep, out):
+    try:
+        n.tune(cfg, chan)               # selects input + standard; RF: verifies the read-back
+    except n.ChannelError as exc:
+        rep.add("tune", chan["id"], False, str(exc))
+        return False
+    if chan["kind"] != "tuner":
+        rep.add("tune", chan["id"], True, f"input {chan['input']} selected")
+        return True
+    raw = n.v4l2(cfg, "--get-tuner").stdout
+    path = os.path.join(out, f"get-tuner-{safe(chan['id'])}.txt")
+    with open(path, "w") as fh:
+        fh.write(raw)
+    sig, afc = n.get_signal(cfg)
+    note = ("" if sig else
+            " (some tuners, e.g. the 800e's xc3028, report 0 % even on a real picture)")
+    rep.add("tune", chan["id"], True, f"{chan['freq']:.3f} MHz read back; signal {sig} %{note}",
+            signal=sig, afc=afc, get_tuner=path)
+    return True
+
+
+def judge_picture(n, cfg, data):
+    m = n.picture_metrics(data, float(cfg["SCAN_VAR_MIN"])) if data else None
+    return (bool(m) and n.looks_like_picture(m, cfg)), m
+
+
+def fmt_metrics(m):
+    if not m:
+        return "no frames captured"
+    return ", ".join(f"{k} {'-' if v is None else round(v, 3)}" for k, v in m.items())
+
+
+def check_picture(n, cfg, info, chan, want, rep, out):
+    tuned = check_tuning(n, cfg, chan, rep, out) if want else _quiet_tune(n, cfg, chan, rep)
+    if not tuned:
+        return
+    time.sleep(float(cfg["SCAN_DWELL"]))
+    data = n.capture_gray(cfg, info)
+    is_pic, m = judge_picture(n, cfg, data)
+    base = os.path.join(out, f"scan-{safe(chan['id'])}")
+    with open(base + ".gray", "wb") as fh:
+        fh.write(data)
+    gray_sheet(n, data, base + ".png")
+    label = "picture" if is_pic else "no picture"
+    rep.add("scan", chan["id"], is_pic == want,
+            f"{label} (want {'picture' if want else 'none'}): {fmt_metrics(m)}",
+            metrics=m, gray=base + ".gray")
+
+
+def _quiet_tune(n, cfg, chan, rep):
+    try:
+        n.tune(cfg, chan)
+        return True
+    except n.ChannelError as exc:
+        rep.add("tune", chan["id"], False, str(exc))
+        return False
+
+
+# ---------------------------------------------------------------- streaming ------------- #
+def check_stream(ntsc_path, chan, seconds, rep, out):
+    clip = os.path.join(out, f"stream-{safe(chan['id'])}.ts")
+    p = subprocess.Popen([ntsc_path, "stream", chan["id"]], stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE)
+    try:
+        data, ttfb = read_for(p.stdout, seconds)
+    finally:
+        p.send_signal(signal.SIGTERM)
+        try:
+            _, err = p.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            _, err = p.communicate()
+    with open(clip, "wb") as fh:
+        fh.write(data)
+    if not data:
+        rep.add("stream", chan["id"], False,
+                "no data: " + (err.decode(errors="replace").strip()[-200:] or "empty stream"))
+        return
+    streams = ffprobe_streams(clip)
+    png = clip[:-3] + ".png"
+    still(clip, png, min(3, seconds / 2))
+    has_video = any(not s.startswith(("mp2", "aac", "ac3", "opus")) for s in streams)
+    rep.add("stream", chan["id"], has_video,
+            f"first byte {ttfb:.1f} s, {len(data) * 8 / seconds / 1e6:.1f} Mb/s; "
+            + ("; ".join(streams) or "ffprobe found no streams"),
+            ttfb=round(ttfb, 2), streams=streams, clip=clip)
+
+
+# ---------------------------------------------------------------- TVHeadend ------------- #
+class Tvh:
+    def __init__(self, url, user=None, password=None):
+        self.url = url.rstrip("/")
+        handlers = []
+        if user:                        # TVHeadend asks for digest or basic, per its config
+            mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+            mgr.add_password(None, self.url, user, password or "")
+            handlers += [urllib.request.HTTPDigestAuthHandler(mgr),
+                         urllib.request.HTTPBasicAuthHandler(mgr)]
+        self.opener = urllib.request.build_opener(*handlers)
+
+    def open(self, path, timeout=30):
+        return self.opener.open(self.url + path, timeout=timeout)
+
+    def api(self, path):
+        with self.open(path) as r:
+            return json.loads(r.read().decode())
+
+    def channel_uuid(self, name):
+        for e in self.api("/api/channel/grid?limit=10000")["entries"]:
+            if e.get("name") == name:
+                return e["uuid"]
+        return None
+
+    def profiles(self, pattern):
+        names = [e["val"] for e in self.api("/api/profile/list")["entries"]]
+        return sorted(n for n in names if fnmatch.fnmatch(n, pattern))
+
+
+def check_profiles(tvh, channel, pattern, seconds, rep, out):
+    try:
+        uuid = tvh.channel_uuid(channel)
+        names = tvh.profiles(pattern)
+    except OSError as exc:
+        rep.add("tvh", tvh.url, False, f"API not reachable: {exc}")
+        return
+    if not uuid:
+        rep.add("tvh", channel, False, "no TVHeadend channel with that name")
+        return
+    if not names:
+        rep.add("tvh", pattern, False, "no stream profile matches")
+        return
+    for name in names:
+        clip = os.path.join(out, f"profile-{safe(name)}.bin")
+        try:
+            with tvh.open(f"/stream/channel/{uuid}?profile={urllib.parse.quote(name)}",
+                          timeout=seconds + 30) as r:
+                data, ttfb = read_for(r, seconds)
+        except OSError as exc:
+            rep.add("profile", name, False, f"request failed: {exc}")
+            continue
+        with open(clip, "wb") as fh:
+            fh.write(data)
+        streams = ffprobe_streams(clip) if data else []
+        still(clip, clip[:-4] + ".png", min(3, seconds / 2))
+        ok = bool(data) and any(s.split()[0] in ("h264", "hevc", "av1", "mpeg2video", "vp8",
+                                                 "vp9") for s in streams)
+        rep.add("profile", name, ok,
+                (f"first byte {ttfb:.1f} s; " if ttfb is not None else "no data; ")
+                + "; ".join(streams), streams=streams, clip=clip)
+        time.sleep(2)                   # let TVHeadend stop the previous spawn first
+
+
+# ---------------------------------------------------------------- main ------------------ #
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="Check one analog channel end to end.")
+    ap.add_argument("channel", help="e.g. us-bcast:4, us-cable:95, input:composite")
+    ap.add_argument("--empty", help="comma list of channels that must NOT show a picture "
+                                    "(default: the RF neighbours of CHANNEL)")
+    ap.add_argument("--no-empty", action="store_true", help="skip the empty-channel check")
+    ap.add_argument("--out", help="report directory (default ./analog-check-<time>)")
+    ap.add_argument("--seconds", type=float, default=8, help="seconds per stream (default 8)")
+    ap.add_argument("--ntsc-tvh", help="path to ntsc-tvh (default: next to examples/, or PATH)")
+    ap.add_argument("--tvh", help="TVHeadend URL, e.g. http://localhost:9981")
+    ap.add_argument("--tvh-channel", help="TVHeadend channel name carrying CHANNEL")
+    ap.add_argument("--profiles", default="analog-*", help="profile name pattern (analog-*)")
+    ap.add_argument("--user")
+    ap.add_argument("--password")
+    args = ap.parse_args(argv)
+    if bool(args.tvh) != bool(args.tvh_channel):
+        ap.error("--tvh and --tvh-channel go together")
+
+    ntsc_path = find_ntsc(args.ntsc_tvh)
+    n = load_ntsc(ntsc_path)
+    cfg = n.load_config()
+    try:
+        chan = n.parse_channel(args.channel)
+        empties = ([] if args.no_empty else
+                   [n.parse_channel(c.strip()) for c in args.empty.split(",") if c.strip()]
+                   if args.empty else default_empties(n, chan))
+    except n.ChannelError as exc:
+        sys.exit(f"analog-check: {exc}")
+
+    out = args.out or f"analog-check-{datetime.now():%Y%m%d-%H%M%S}"
+    os.makedirs(out, exist_ok=True)
+    rep = Report()
+    print(f"analog-check {chan['id']} on {cfg['DEVICE']} -> {out}/")
+    try:
+        with n.TunerLock(cfg["LOCK_FILE"], wait=float(cfg["SCAN_LOCK_WAIT"])):
+            info = check_device(n, cfg, rep)
+            check_picture(n, cfg, info, chan, True, rep, out)
+            for e in empties:
+                check_picture(n, cfg, info, e, False, rep, out)
+            n.tune(cfg, chan)           # leave the tuner on CHANNEL
+    except n.ChannelError as exc:
+        rep.add("device", cfg["DEVICE"], False, str(exc))
+    # A missing picture doesn't stop the rest: a stream that runs but is black or snowy
+    # tells you the problem is the signal, not the streaming. A device/tuning error does.
+    blocked = any(r["step"] in ("device", "tune") for r in rep.failed)
+    if not blocked:
+        check_stream(ntsc_path, chan, args.seconds, rep, out)
+    if args.tvh and not blocked:
+        check_profiles(Tvh(args.tvh, args.user, args.password), args.tvh_channel,
+                       args.profiles, args.seconds, rep, out)
+
+    with open(os.path.join(out, "summary.json"), "w") as fh:
+        json.dump({"channel": chan["id"], "device": cfg["DEVICE"], "results": rep.results},
+                  fh, indent=2, default=str)
+    bad = rep.failed
+    print(f"{'FAILED' if bad else 'OK'}: {len(rep.results) - len(bad)}/{len(rep.results)} "
+          f"checks passed; report in {out}/")
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

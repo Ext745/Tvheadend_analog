@@ -628,14 +628,18 @@ Analog "is this channel live?" is inherently fuzzy. Three strategies:
 
   The defaults (0.60 / 0.9) sit between the two groups. In simulation, very
   noisy, fast-moving pictures (roughly σ ≥ 10 grey levels of added noise) can be
-  missed; calm ones survive σ 20–30+. Not yet checked
-  against real analog pictures. `scan` prints `var`, `noise` and `motion` for
-  every channel, so the thresholds can be tuned.
+  missed; calm ones survive σ 20–30+. First real analog picture (an RF
+  modulator's colour bars on us-bcast:4, 800e): `noise` 0.17, `motion` 0.01–0.03,
+  so live; its neighbours 3 and 5 (snow) scored `noise` 0.69–0.83 and `motion`
+  1.3–1.4, so empty. `scan` prints `var`, `noise` and `motion` for every channel,
+  so the thresholds can be tuned, and `examples/analog-check` (§14) repeats this
+  check for one channel.
 - **`both`** — require signal AND a picture. Fewest false positives, slowest.
 
 Recommendation: start with `signal` and a threshold you calibrate against two or
 three channels you *know* are live (`ntsc-tvh signal us-cable:23`), then switch to
-`both` if you get false positives. There is no magic here — it's a heuristic, and
+`both` if you get false positives. On the 800e the signal figure stays at 0 % even
+on a real picture, so use `video` there. There is no magic here — it's a heuristic, and
 the tool is explicit about that rather than pretending otherwise.
 
 ---
@@ -959,6 +963,8 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
   traceback; they now carry on without audio.
 - **`list --tables` with a wrong name** prints `error: unknown table ...` instead
   of a Python traceback.
+- **`examples/analog-check`** checks one channel that carries a real analog picture
+  from end to end, and leaves a report of pictures and fixture files (§14).
 
 ---
 
@@ -988,6 +994,30 @@ needs the tuner locked on a live analog channel. Once one is available, replace 
 ```bash
 v4l2-ctl -d /dev/video0 --get-tuner    > v4l2-get-tuner-locked.txt   # tuned to a live channel
 ```
+
+### Checking a real analog channel: `examples/analog-check`
+
+The unit tests can't tell whether a real picture gets through. When you have one (a
+live channel, an RF modulator, a camera on Composite), run this where ntsc-tvh runs,
+with nothing else using the tuner:
+
+```bash
+docker exec -u abc tvheadend /opt/ntsc-tvh/examples/analog-check us-bcast:4
+docker exec -u abc tvheadend /opt/ntsc-tvh/examples/analog-check input:composite \
+    --tvh http://localhost:9981 --tvh-channel "Composite In"      # + every analog-* profile
+```
+
+It checks the device, tuning (frequency read-back, signal %), the video scan's verdict
+(CHANNEL must count as a picture, its RF neighbours must not; `--empty` to pick others),
+`ntsc-tvh stream` (time to first byte, the streams in it) and, with `--tvh`, each
+matching stream profile through TVHeadend. A missing picture is reported but doesn't
+stop the stream checks, so a black or snowy stream points at the signal; a device or
+tuning error does stop them. Pass `-e DEVICE=/dev/video1` (etc.) for another card. It
+writes `analog-check-<time>/` (or `--out`): `summary.json`, a still from each stream,
+the scan's frames as `.gray` + a `.png` contact sheet, and the raw `v4l2-ctl
+--get-tuner` output. Those `.gray` and `get-tuner-*.txt` files are ready to copy into
+`tests/fixtures/` (e.g. `v4l2-get-tuner-locked.txt` once a tuner reports signal on a
+live channel). Exits 1 if anything failed.
 
 Tests marked `@unittest.expectedFailure` record known bugs. When a fix lands, the
 test passes unexpectedly and the run fails until you remove the decorator.
