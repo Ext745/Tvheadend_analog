@@ -621,12 +621,16 @@ grab.
 Grabber** (EIT is the European/DVB one). Under *EPG Grabber*, set the **OTA timeout** to
 about **120 s**: the PSIP grabber never reports a mux as complete, so with the default
 600 s each mux holds the tuner for 10 minutes. PSIP itself delivers in under a minute.
+Then run **Force scan** on the network once. The grabber only revisits muxes on which it
+has already seen guide tables, so until every mux has been tuned with PSIP enabled, the
+scheduled grab keeps going back to the one or two you happened to watch.
 
 What happened on the test setup that taught us this: one ATSC network had both lists,
 so 81 muxes for 12 stations (62 failed, 7 duplicates). The scheduled guide grab sat
 10 minutes on each dead mux and filled nothing. With the junk disabled, 13 muxes
 remained, and with PSIP on and a 120 s timeout one minute on a single station gave 96
-guide entries.
+guide entries; the next scheduled grab still visited only that station. A Force scan
+of the 13 muxes (80 s) brought it to 705 entries on 55 channels.
 
 On a hybrid card that shares its tuner between analog and digital (the 800e), a
 scheduled guide grab can retune it under an analog stream; see §11.
@@ -995,6 +999,20 @@ countries put out NTSC-M.
 
 Not NTSC, despite being in the Americas: Brazil (PAL-M), Argentina and Uruguay
 (PAL-N).
+
+**Digital channels in TVHeadend** use the country's *digital* system, which isn't tied to
+its old analog one. The predefined mux lists TVHeadend ships (from LinuxTV's
+dtv-scan-tables, in the linuxserver build: `/usr/share/tvheadend/data/dvb-scan/`) cover
+only a few of these countries:
+
+| Country | Predefined list to pick | System (per the file) |
+|---|---|---|
+| United States | `us-ATSC-center-frequencies-8VSB` (antenna, see [§6c](#6c-atsc-digital-network-in-tvheadend--get-this-right-first)); cable: `us-Cable-Standard-center-frequencies-QAM256` (or the `-IRC`/`-HRC` one your cable plant uses) | ATSC / clear QAM |
+| Canada | `us-ATSC-center-frequencies-8VSB` (its header says "USA and Canada"); `ca-ON-Toronto` and `ca-AB-Calgary` are old local scans | ATSC |
+| South Korea | only `kr-Cable-8VSB`, which is for cable | DVB-C Annex B (cable) |
+| Colombia | `co-All` | DVB-T2, 6 MHz |
+| Taiwan | `tw-All` (or `auto-Taiwan`) | DVB-T |
+| Everyone else in the table above, Japan included | none: add the muxes by hand from a local frequency list | — |
 
 What this means for ntsc-tvh:
 - **Composite and S-Video inputs** work with NTSC-M video from any of these countries.
