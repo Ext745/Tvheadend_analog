@@ -154,6 +154,28 @@ SPAWN = [
      "variants": vaapi_scaled("deinterlace_vaapi=rate=field:auto=1", "bwdif=1:-1:1",
                               "scale_vaapi=w=960:h=720", "-c:v h264_vaapi -qp 23 -g 120"),
      "aenc": AAC.format(160)},
+    # For the DVR (see DVR below): a slower preset and higher quality than live viewing,
+    # since nobody waits for it, at roughly a third of the MPEG-2 size. MPEG-TS so a
+    # recording that is cut short stays playable.
+    {"name": "analog-h264-rec", "gated": False, "mime": "video/mp2t", "fmt": "mpegts",
+     "comment": "Analog recordings: H.264/AAC 192k in MPEG-TS (DVR profile 'Analog H.264')",
+     "vf": "bwdif=0:-1:1", "venc": "-c:v libx264 -preset faster -crf 20 -g 60 -pix_fmt yuv420p",
+     "aenc": AAC.format(192)},
+    {"name": "analog-h264-vaapi-rec", "gated": True, "vaapi": True, "mime": "video/mp2t",
+     "fmt": "mpegts",
+     "comment": "Analog recordings: H.264/AAC 192k, encoded on the GPU (DVR profile 'Analog H.264 (GPU)')",
+     "variants": vaapi("deinterlace_vaapi=auto=1", "bwdif=0:-1:1", "-c:v h264_vaapi -qp 21 -g 60"),
+     "aenc": AAC.format(192)},
+]
+
+# DVR profiles (Configuration -> Recording), each recording through one of the stream
+# profiles above. Created only if that stream profile exists. Storage path and file name
+# pattern are copied from the default DVR profile when created, and left alone after.
+DVR = [
+    {"name": "Analog H.264", "profile": "analog-h264-rec",
+     "comment": "Record analog channels as H.264/AAC (about a third of the MPEG-2 size)"},
+    {"name": "Analog H.264 (GPU)", "profile": "analog-h264-vaapi-rec",
+     "comment": "Record analog channels as H.264/AAC, encoded on the GPU (VAAPI)"},
 ]
 
 
@@ -228,7 +250,10 @@ class Tvh:
         return json.loads(body) if body.strip() else {}
 
     def existing(self, kind):
-        """{name: uuid} of the codec profiles or stream profiles."""
+        """{name: uuid} of the codec profiles, stream profiles or DVR profiles."""
+        if kind == "dvr":
+            return {e.get("name", ""): e["uuid"]
+                    for e in self.call("dvr/config/grid", limit=1000).get("entries", [])}
         if kind == "codec":
             uuids = [e["uuid"] for e in self.call("codec_profile/list").get("entries", [])]
         else:
@@ -249,8 +274,11 @@ class Tvh:
         else:
             action = "create"
             if not self.dry_run:
-                create = "codec_profile/create" if kind == "codec" else "profile/create"
-                self.call(create, **{"class": cls, "conf": conf})
+                if kind == "DVR":
+                    self.call("dvr/config/create", conf=conf)
+                else:
+                    create = "codec_profile/create" if kind == "codec" else "profile/create"
+                    self.call(create, **{"class": cls, "conf": conf})
         print(f"{'would ' if self.dry_run else ''}{action:<6} {kind} profile {name}")
 
     def remove(self, kind, names, have):
@@ -278,6 +306,8 @@ def main():
     tvh = Tvh(args.url, args.user, args.password, args.dry_run)
     if args.remove:
         # stream profiles first: they reference the codec profiles
+        # DVR profiles first (they use the stream profiles), then stream, then codec
+        tvh.remove("DVR", [d["name"] for d in DVR], tvh.existing("dvr"))
         names = [p["name"] for p in TRANSCODE + SPAWN]
         tvh.remove("stream", names, tvh.existing("stream"))
         tvh.remove("codec", [c["name"] for _, c in CODECS], tvh.existing("codec"))
@@ -288,6 +318,7 @@ def main():
     have = tvh.existing("stream")
     for conf in TRANSCODE:
         tvh.apply("stream", "profile-transcode", dict(conf, enabled=True), have)
+    planned = set()                      # stream profiles this run creates or updates
     with tempfile.TemporaryDirectory() as tmp:
         clip = None
         for p in SPAWN:
@@ -320,6 +351,20 @@ def main():
             conf = {"name": p["name"], "comment": p["comment"], "mime": p["mime"],
                     "enabled": True, "cmdline": spawn_cmdline(p, chosen, args.vaapi_device)}
             tvh.apply("stream", "profile-mpegts-spawn", conf, have)
+            planned.add(p["name"])
+    streams = tvh.existing("stream")
+    dvrs = tvh.existing("dvr")
+    default = tvh.call("idnode/load", uuid=dvrs[""])["entries"][0] if "" in dvrs else None
+    for d in DVR:
+        if d["profile"] not in streams and not (tvh.dry_run and d["profile"] in planned):
+            print(f"skip   DVR profile {d['name']}: stream profile {d['profile']} not created")
+            continue
+        conf = {"name": d["name"], "comment": d["comment"], "enabled": True,
+                "profile": streams.get(d["profile"], d["profile"])}
+        if d["name"] not in dvrs and default:
+            conf.update({p["id"]: p["value"] for p in default["params"]
+                         if p["id"] in ("storage", "pathname")})
+        tvh.apply("DVR", None, conf, dvrs)
 
 if __name__ == "__main__":
     main()

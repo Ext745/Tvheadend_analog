@@ -367,6 +367,23 @@ All profiles deinterlace only frames that are actually interlaced, and keep the
 4:3 shape. Pick a profile per client (the `?profile=` URL parameter, or a user's or
 access entry's streaming profile in TVHeadend).
 
+**Recording analog as H.264.** The script also creates two DVR profiles
+(**Configuration → Recording**):
+- **Analog H.264** uses the `analog-h264-rec` stream profile: x264 at the slower
+  `faster` preset, CRF 20, AAC 192 kb/s, in MPEG-TS so a recording that is cut
+  short stays playable.
+- **Analog H.264 (GPU)** uses `analog-h264-vaapi-rec`. It is only created if the
+  GPU test passes.
+
+On a real 480i clip, H.264 came out at about 28% of the MPEG-2 size (0.85 vs
+3.0 Mb/s, or about 0.4 GB/h instead of 1.4 GB/h). The HVR-1950's own MPEG-2
+usually runs at a higher bitrate, so the saving there is larger. New DVR profiles
+copy the storage path and file-name pattern from the default DVR profile; later
+runs don't touch them. Analog channels have no EPG, so record with a **timer**
+(DVR → Timers, or a manual entry) and pick the DVR profile there, or make it the
+DVR profile of a user or access entry. The default DVR profile still records
+MPEG-2 as received, with no CPU cost and no quality loss.
+
 🎮 **VAAPI (Intel/AMD GPU) profiles** need the GPU passed into the container
 (`devices: - /dev/dri:/dev/dri`; linuxserver's init gives TVHeadend's user the
 render group by itself). The linuxserver image already ships both Intel VAAPI
@@ -779,7 +796,8 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
   to start while the DVB side is busy, instead of wedging the card (see §11).
 - **Stream profiles for analog clients** (`examples/tvh-analog-profiles`, §6b):
   H.264/AAC for IPTV apps, browsers and phones, plus H.265, AV1, an upscaled
-  59.94p H.264, and VAAPI (GPU) versions at about a tenth of the CPU. The heavier
+  59.94p H.264, VAAPI (GPU) versions at about a tenth of the CPU, and H.264 DVR
+  profiles for recording analog at about a third of the size. The heavier
   profiles are only created if a test encode shows the machine (and GPU) can keep
   up.
 - **Quieter TVHeadend log.** The `ntsc-tvh: streaming …` status line is only

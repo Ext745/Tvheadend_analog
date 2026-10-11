@@ -32,11 +32,16 @@ prof = load()
 
 
 class FakeApi:
-    """Stands in for Tvh.call(): a TVHeadend with some profiles already present."""
+    """Stands in for Tvh.call(): a TVHeadend with some profiles already present, and a
+    default DVR profile (name "") whose storage/pathname new DVR profiles copy."""
 
-    def __init__(self, codecs=(), streams=()):
+    DEFAULT_DVR = {"storage": "/recordings/", "pathname": "$t/$t -$ e -$ s$n.$x"}
+
+    def __init__(self, codecs=(), streams=(), dvrs=()):
         self.nodes = {f"c{i}": n for i, n in enumerate(codecs)}
         self.nodes.update({f"s{i}": n for i, n in enumerate(streams)})
+        self.nodes["d-default"] = ""
+        self.nodes.update({f"d{i}": n for i, n in enumerate(dvrs)})
         self.calls = []
 
     def __call__(self, path, **form):
@@ -45,13 +50,22 @@ class FakeApi:
             return {"entries": [{"uuid": u} for u in self.nodes if u.startswith("c")]}
         if path == "profile/list":
             return {"entries": [{"key": u} for u in self.nodes if u.startswith("s")]}
+        if path == "dvr/config/grid":
+            return {"entries": [{"uuid": u, "name": n} for u, n in self.nodes.items()
+                                if u.startswith("d")]}
+        if path == "profile/create":       # remember it, so DVR profiles can refer to it
+            self.nodes[f"s-new{len(self.nodes)}"] = form["conf"]["name"]
         if path == "idnode/load":
-            return {"entries": [{"params": [{"id": "name", "value": self.nodes[form["uuid"]]}]}]}
+            params = [{"id": "name", "value": self.nodes[form["uuid"]]}]
+            if form["uuid"] == "d-default":
+                params += [{"id": k, "value": v} for k, v in self.DEFAULT_DVR.items()]
+            return {"entries": [{"params": params}]}
         return {}
 
     def writes(self):
         return [(p, f) for p, f in self.calls
-                if p in ("codec_profile/create", "profile/create", "idnode/save", "idnode/delete")]
+                if p in ("codec_profile/create", "profile/create", "dvr/config/create",
+                         "idnode/save", "idnode/delete")]
 
 
 class Profiles(unittest.TestCase):
@@ -99,8 +113,12 @@ class Profiles(unittest.TestCase):
             ("profile/create", "profile-mpegts-spawn", "analog-av1-vaapi-webm"),
             ("profile/create", "profile-mpegts-spawn", "analog-mobile-vaapi"),
             ("profile/create", "profile-mpegts-spawn", "analog-h264-vaapi-720p60"),
+            ("profile/create", "profile-mpegts-spawn", "analog-h264-rec"),
+            ("profile/create", "profile-mpegts-spawn", "analog-h264-vaapi-rec"),
+            ("dvr/config/create", None, "Analog H.264"),
+            ("dvr/config/create", None, "Analog H.264 (GPU)"),
         ])
-        self.assertEqual(self.bench.call_count, 8)          # only the gated ones are timed
+        self.assertEqual(self.bench.call_count, 9)          # only the gated ones are timed
 
     def test_slow_machine_gets_only_the_base_profiles(self):
         api, out = self.run_main(speed=1.5)
@@ -112,14 +130,17 @@ class Profiles(unittest.TestCase):
 
     def test_min_speed_and_all(self):
         api, _ = self.run_main("--min-speed", "1.0", speed=1.5)
-        self.assertEqual(len(self.created(api)), 13)
+        self.assertEqual(len(self.created(api)), 17)
         api, _ = self.run_main("--all", speed=0.1)
-        self.assertEqual(len(self.created(api)), 13)
+        self.assertEqual(len(self.created(api)), 17)
         self.assertEqual(self.bench.call_count, 0)
 
     def test_no_ffmpeg_skips_gated_profiles(self):
         api, out = self.run_main(clip=False)
-        self.assertEqual(len(self.created(api)), 5)
+        names = [n for _, _, n in self.created(api)]
+        self.assertEqual(len(names), 7)       # 2 codec, 4 stream (incl. recording), 1 DVR
+        self.assertIn("Analog H.264", names)
+        self.assertNotIn("Analog H.264 (GPU)", names)
         self.assertIn("run inside the TVHeadend container", out)
         self.assertEqual(self.bench.call_count, 0)
 
@@ -129,6 +150,28 @@ class Profiles(unittest.TestCase):
         self.assertFalse([n for n in names if "vaapi" in n])
         self.assertIn("analog-h264-720p60", names)
         self.assertIn("devices: /dev/dri:/dev/dri", out)
+
+    def test_dvr_profile_records_through_its_stream_profile(self):
+        api, _ = self.run_main()
+        (conf,) = [f["conf"] for p, f in api.writes()
+                   if p == "dvr/config/create" and f["conf"]["name"] == "Analog H.264"]
+        self.assertEqual(api.nodes[conf["profile"]], "analog-h264-rec")
+        self.assertEqual(conf["storage"], "/recordings/")             # copied from default
+        self.assertEqual(conf["pathname"], "$t/$t -$ e -$ s$n.$x")
+
+    def test_existing_dvr_profile_keeps_its_storage_and_pathname(self):
+        api, _ = self.run_main(api=FakeApi(dvrs=["Analog H.264"]))
+        (node,) = [f["node"] for p, f in api.writes()
+                   if p == "idnode/save" and f["node"]["name"] == "Analog H.264"]
+        self.assertEqual(node["uuid"], "d0")
+        self.assertNotIn("storage", node)
+        self.assertNotIn("pathname", node)
+
+    def test_gpu_dvr_profile_needs_the_gpu_recording_profile(self):
+        api, out = self.run_main("--vaapi-device", self.gpu + "-missing")
+        self.assertNotIn("Analog H.264 (GPU)", [n for _, _, n in self.created(api)])
+        self.assertIn("skip   DVR profile Analog H.264 (GPU): stream profile analog-h264-vaapi-rec "
+                      "not created", out)
 
     def test_vaapi_falls_back_to_software_deinterlace(self):
         # e.g. a GPU that decodes/encodes but can't run deinterlace_vaapi
@@ -170,9 +213,11 @@ class Profiles(unittest.TestCase):
 
     def test_remove(self):
         api = FakeApi(codecs=["analog-h264", "analog-aac", "webtv-h264"],
-                      streams=["analog-mobile", "analog-av1-opus-webm", "pass"])
+                      streams=["analog-mobile", "analog-av1-opus-webm", "pass"],
+                      dvrs=["Analog H.264", "My own profile"])
         api, _ = self.run_main("--remove", api=api)
-        self.assertEqual([f["uuid"] for p, f in api.writes()], ["s0", "s1", "c0", "c1"])
+        # DVR profiles first (they use the stream profiles); the default and others stay
+        self.assertEqual([f["uuid"] for p, f in api.writes()], ["d0", "s0", "s1", "c0", "c1"])
 
 
 class SpawnCommands(unittest.TestCase):
