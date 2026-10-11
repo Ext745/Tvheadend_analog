@@ -394,10 +394,13 @@ def get_signal_live(cfg, info):
     Hardware-encoder cards (HVR-1950) report it idle, so they're read directly."""
     if info["hw_encoder"]:
         return get_signal(cfg)
-    ff = subprocess.Popen([cfg["FFMPEG"], "-hide_banner", "-loglevel", "error",
-                           "-f", "v4l2", "-i", cfg["DEVICE"], "-f", "null", "-"],
-                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                          stderr=subprocess.DEVNULL, preexec_fn=_die_with_parent)
+    try:
+        ff = subprocess.Popen([cfg["FFMPEG"], "-hide_banner", "-loglevel", "error",
+                               "-f", "v4l2", "-i", cfg["DEVICE"], "-f", "null", "-"],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, preexec_fn=_die_with_parent)
+    except OSError:                 # no ffmpeg: the idle reading is all there is
+        return get_signal(cfg)
     try:
         sig, afc = signal_while(cfg, lambda: ff.poll() is None,
                                 time.monotonic() + SIGNAL_CAPTURE_SECONDS)

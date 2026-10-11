@@ -76,6 +76,11 @@ class Live(unittest.TestCase):
              mock.patch.object(ntsc, "SIGNAL_CAPTURE_SECONDS", 0.05):
             self.assertEqual(ntsc.get_signal_live(make_cfg(), RAW), (0, 0))
 
+    def test_raw_card_without_ffmpeg_falls_back_to_the_idle_reading(self):
+        with mock.patch.object(ntsc, "get_signal", return_value=(0, 0)), \
+             mock.patch.object(ntsc.subprocess, "Popen", side_effect=FileNotFoundError("ffmpeg")):
+            self.assertEqual(ntsc.get_signal_live(make_cfg(), RAW), (0, 0))
+
     def test_signal_command_reports_the_live_reading_on_a_raw_card(self):
         out = io.StringIO()
         with tempfile.TemporaryDirectory() as tmp, \
