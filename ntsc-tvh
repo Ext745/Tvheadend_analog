@@ -385,7 +385,9 @@ def build_ffmpeg_cmd(cfg, info):
            "-f", "v4l2", "-i", cfg["DEVICE"]]
     if adev:
         cmd += ["-f", "alsa", "-ac", "2", "-ar", "48000", "-i", adev]
-    cmd += ["-c:v", "mpeg2video", "-b:v", cfg["RAW_VBITRATE"],
+    # yuv420p: raw cards capture 4:2:2 (YUYV), which would make this MPEG-2 4:2:2 profile --
+    # a studio format that GPU decoders (VAAPI) and many TVs/set-top boxes can't play.
+    cmd += ["-c:v", "mpeg2video", "-b:v", cfg["RAW_VBITRATE"], "-pix_fmt", "yuv420p",
             "-filter:v", "yadif=0:-1:0", "-aspect", cfg["RAW_ASPECT"]]
     cmd += (aargs if acodec != "copy" else ["-c:a", "mp2", "-b:a", "224k"])
     cmd += ["-f", "mpegts", "pipe:1"]

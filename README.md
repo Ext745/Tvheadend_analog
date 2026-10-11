@@ -746,6 +746,10 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
   contrast alone, so on tuners that show snow (the 800e) every empty channel
   was "active". It now also checks spatial noise and frame-to-frame motion
   (`SCAN_NOISE_MAX`, `SCAN_MOTION_MAX`; see §7).
+- **Raw cards produce standard MPEG-2 (Main profile, 4:2:0).** Raw cards capture
+  4:2:2 (YUYV), and the software encode kept it, producing MPEG-2 *4:2:2 profile*:
+  a studio format that GPU decoders (VAAPI) and many TVs and set-top boxes can't
+  decode. It now converts to 4:2:0 like broadcast MPEG-2.
 - **Raw cards keep a 4:3 picture.** The software MPEG-2 encode labelled 720×480
   analog as square pixels (3:2), so players showed it about 12% too wide. It is
   now written as 4:3 (`RAW_ASPECT`, `16:9` for anamorphic sources).
