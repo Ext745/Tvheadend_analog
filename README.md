@@ -388,6 +388,7 @@ a `# comment` after whitespace is ignored. The most useful:
 | `AUDIO_CODEC`          | `copy`                           | `copy`/`mp2`/`ac3` (copy = native, 0 CPU) |
 | `VIDEO_BITRATE`        | *(driver default)*               | pin HW MPEG-2 bitrate, e.g. `6000000`     |
 | `CAPTURE_VIA_CAT`      | `1`                              | `1` = `cat dev \| ffmpeg` (reliable read; stream + video scan) |
+| `STOP_GRACE`           | `1`                              | seconds ffmpeg gets after SIGTERM before SIGKILL |
 | `SCAN_TABLES`          | `us-bcast,us-cable`              | plans walked by `scan`                    |
 | `SCAN_METHOD`          | `signal`                        | `signal`/`video`/`both`                   |
 | `SCAN_THRESHOLD`       | `35`                             | signal % cutoff                           |
@@ -479,12 +480,20 @@ changing the pipe:// URLs between playlist reads — the URL is the mux's identi
 Don't hand-edit the M3U structure; let the tool own it, and keep `SELF_PATH`
 fixed so the baked-in path never moves.
 
-**"Tuner busy" on a quick channel change.** If you ever see this on channel
-flips, an ffmpeg from the previous subscription didn't exit promptly. The shipped
-stream path execs ffmpeg in place (cat is a child feeding its stdin), so
-TVHeadend's SIGTERM reaches ffmpeg directly and the lock releases cleanly — this
-should not occur with the current code, but if you've modified the cat-branch to
-run through a shell wrapper, the signal lands on the shell instead of ffmpeg.
+**"Tuner busy" on a quick channel change.** The previous subscription's stream
+hasn't finished stopping. `ntsc-tvh stream` supervises ffmpeg (and `cat`) as
+child processes, so it stops promptly with either **Kill signal (pipe)**
+setting on the mux:
+- **SIGKILL** (TVHeadend's default): the kernel kills ffmpeg and `cat` along
+  with ntsc-tvh (`PR_SET_PDEATHSIG`), and the lock is freed at once.
+- **SIGTERM / SIGINT / SIGHUP**: ffmpeg gets SIGTERM and `STOP_GRACE` seconds
+  (default 1) to exit, then SIGKILL. Some ffmpeg builds (e.g. 6.1 in the Alpine
+  image) never exit on SIGTERM with an ALSA input, which raw cards like the 800e
+  use.
+
+The next stream waits up to `SCAN_LOCK_WAIT` (5 s) for the lock, which covers
+either case. If you still see this, check for a stray ffmpeg holding the device
+(`docker exec tvheadend pgrep -a ffmpeg`).
 
 ---
 
@@ -548,22 +557,32 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
   A tuner that didn't move (e.g. missing xc3028 firmware) is now an error, not
   "0% signal". `scan` aborts instead of overwriting the playlist with nothing.
   Drivers that can't report the frequency are trusted as before.
+- **`stream` supervises ffmpeg instead of exec'ing it.** ntsc-tvh stays the
+  process TVHeadend started and runs `cat`/ffmpeg as children. On SIGTERM,
+  SIGINT or SIGHUP it gives ffmpeg `STOP_GRACE` seconds, then SIGKILLs it.
+  ffmpeg 6.1 (the linuxserver image) never exits on SIGTERM with an em28xx ALSA
+  input: once video stops, the audio read blocks forever. Children are tied to
+  ntsc-tvh with `PR_SET_PDEATHSIG`, so TVHeadend's default SIGKILL still takes
+  them down at once. ffmpeg still writes straight to TVHeadend's pipe and holds
+  the tuner lock until it is gone.
 
 ---
 
 ## 14. Development & tests
 
 The tests need no tuner and no pip installs (stdlib `unittest` only). They load the
-script as a module and replace `v4l2-ctl`, `ffmpeg`, `cat` and `exec` with fakes that
-read canned output from `tests/fixtures/`:
+script as a module and replace `v4l2-ctl`, `ffmpeg` and `cat` with fakes that read
+canned output from `tests/fixtures/`. `tests/test_supervisor.py` runs the real script
+with real signals, using a fake ffmpeg (`tests/fakebin/`) that can ignore SIGTERM:
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
 They cover the frequency plans, channel-ID parsing, config precedence, `v4l2-ctl`
-output parsing, the ffmpeg command line, the `cat | ffmpeg` exec handoff with the
-inheritable tuner lock, scan → state → M3U, and the exact `pipe://` URL format. CI
+output parsing, the ffmpeg command line, stopping a stream on SIGTERM/SIGINT/SIGHUP/
+SIGKILL with nothing left holding the tuner, scan → state → M3U, and the exact
+`pipe://` URL format. CI
 (`.github/workflows/test.yml`) runs them on Python 3.10–3.14 on every push.
 
 The `*-800e.txt` fixtures were captured from a real Pinnacle 800e (em28xx). The

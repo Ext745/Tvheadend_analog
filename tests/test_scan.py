@@ -64,7 +64,8 @@ class VideoVariance(unittest.TestCase):
     def test_hw_reads_via_cat_like_stream(self):
         # ffmpeg opening the MPEG node directly is empty on some builds (see CAPTURE_VIA_CAT).
         self.variance(b"")
-        self.popen.assert_called_once_with(["cat", "/dev/video0"], stdout=subprocess.PIPE)
+        self.popen.assert_called_once_with(["cat", "/dev/video0"], stdout=subprocess.PIPE,
+                                           preexec_fn=ntsc._die_with_parent)
         self.assertEqual(self.cmd[4:8], ["-f", "mpeg", "-i", "pipe:0"])
         self.assertIs(self.stdin, self.cat.stdout)
         self.cat.kill.assert_called_once_with()

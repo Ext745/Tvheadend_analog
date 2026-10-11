@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""Fake ffmpeg for the stream-supervisor tests.
+
+FAKE_FFMPEG selects the behaviour:
+  stubborn  ignore SIGTERM/SIGINT/SIGHUP and run forever (like ffmpeg 6.1 stuck on an
+            em28xx ALSA read once video has stopped)
+  polite    exit on SIGTERM (default handlers)
+  exit3     exit with status 3 on its own (device error / TVHeadend closed the pipe)
+On start it writes a JSON record to FAKE_LOG: pid, argv, the files its fds point at, and
+how many bytes it could read from stdin when that is a pipe (the cat path). Then it
+writes b"FAKE-TS" to stdout.
+"""
+import json, os, signal, stat, sys, time
+
+mode = os.environ.get("FAKE_FFMPEG", "polite")
+if mode == "stubborn":
+    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(s, signal.SIG_IGN)
+fds = {}
+for fd in os.listdir("/proc/self/fd"):
+    try:
+        fds[fd] = os.readlink(f"/proc/self/fd/{fd}")
+    except OSError:
+        pass
+stdin_bytes = None
+if stat.S_ISFIFO(os.fstat(0).st_mode):
+    stdin_bytes = len(os.read(0, 4096))
+tmp = os.environ["FAKE_LOG"] + ".tmp"
+with open(tmp, "w") as fh:
+    json.dump({"pid": os.getpid(), "argv": sys.argv, "fds": fds, "stdin_bytes": stdin_bytes}, fh)
+os.replace(tmp, os.environ["FAKE_LOG"])
+sys.stdout.buffer.write(b"FAKE-TS")
+sys.stdout.flush()
+if mode == "exit3":
+    sys.exit(3)
+while True:
+    time.sleep(1)

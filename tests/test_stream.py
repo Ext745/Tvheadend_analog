@@ -1,6 +1,6 @@
-"""The `stream` path TVHeadend's pipe:// mux invokes: ffmpeg argv, cat|ffmpeg wiring, lock handoff.
+"""The `stream` path TVHeadend's pipe:// mux invokes: ffmpeg argv, ALSA lookup, tuning + lock.
 
-Nothing here execs or opens a device: os.execvp, os.dup2 and subprocess.Popen are faked.
+Nothing here starts a process or opens a device; see test_supervisor.py for the real-process tests.
 """
 
 import argparse
@@ -158,64 +158,30 @@ class AutodetectAlsa(unittest.TestCase):
             self.assertEqual(self.detect(), "")
 
 
-class Exec(Exception):
-    """Raised by the fake os.execvp in place of replacing the test process."""
-
-
 class CmdStream(unittest.TestCase):
+    """Tuning and lock handling around the supervisor (supervise() itself is faked here;
+    test_supervisor.py runs the real one against real processes)."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.events = []
-        self.locks = []
         self.fake = FakeV4L2()
-        locks = self.locks
-
-        class RecordingLock(ntsc.TunerLock):
-            def __enter__(self):
-                locks.append(self)
-                return super().__enter__()
-
-        self.cat = mock.Mock()
-        self.cat.stdout.fileno.return_value = 99
-        self.cat.stdout.close.side_effect = lambda: self.events.append("close")
-
-        for target, kw in (
-            ("run", {"new": self.fake}),
-            ("TunerLock", {"new": RecordingLock}),
-            ("device_info", {"return_value": HW}),
-        ):
+        self.supervised = []
+        for target, kw in (("run", {"new": self.fake}),
+                           ("device_info", {"return_value": HW}),
+                           ("supervise", {"side_effect": self.fake_supervise})):
             p = mock.patch.object(ntsc, target, **kw)
             p.start()
             self.addCleanup(p.stop)
-        for target, kw in (
-            ("ntsc_tvh.time.sleep", {}),
-            ("ntsc_tvh.os.dup2", {"side_effect": lambda a, b: self.events.append(("dup2", a, b))}),
-            ("ntsc_tvh.os.execvp", {"side_effect": self.fake_execvp}),
-            ("ntsc_tvh.subprocess.Popen", {"side_effect": self.fake_popen}),
-        ):
-            p = mock.patch(target, **kw)
-            p.start()
-            self.addCleanup(p.stop)
-        self.addCleanup(self.close_locks)
+        p = mock.patch("ntsc_tvh.time.sleep")
+        p.start()
+        self.addCleanup(p.stop)
 
-    def close_locks(self):
-        for lock in self.locks:
-            if lock.fh and not lock.fh.closed:
-                lock.fh.close()
-
-    def fake_popen(self, argv, **kw):
-        self.events.append(("popen", argv, kw.get("stdout")))
-        return self.cat
-
-    def fake_execvp(self, file, argv):
-        self.events.append(("exec", file, list(argv)))
-        lock = self.locks[-1]
-        # At exec time the tuner lock must still be held, by an fd that survives exec().
-        self.lock_inheritable = os.get_inheritable(lock.fh.fileno())
-        self.lock_held = self.lock_is_held(lock.path)
-        raise Exec()
+    def fake_supervise(self, cfg, cmd, lock, via_cat):
+        self.supervised.append({"cmd": cmd, "via_cat": via_cat,
+                                "lock_held": self.lock_is_held(lock.path),
+                                "tuned_first": any(o.startswith("--set-") for o in self.fake.opts())})
+        return 143
 
     def lock_is_held(self, path):
         try:
@@ -225,44 +191,29 @@ class CmdStream(unittest.TestCase):
             return True
 
     def stream(self, channel="us-bcast:7", wait=None, **cfg):
-        cfg = make_cfg(self.tmp.name, **cfg)
-        args = argparse.Namespace(channel=channel, wait=wait)
+        self.cfg = make_cfg(self.tmp.name, **cfg)
         err = io.StringIO()
-        with redirect_stderr(err):
-            try:
-                ntsc.cmd_stream(cfg, args)
-            except Exec:
-                pass
+        with redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+            ntsc.cmd_stream(self.cfg, argparse.Namespace(channel=channel, wait=wait))
         self.stderr = err.getvalue()
-        return cfg
+        return cm.exception.code
 
-    def test_cat_pipeline_wiring(self):
-        cfg = self.stream()
-        self.assertEqual(self.events, [
-            ("popen", ["cat", "/dev/video0"], subprocess.PIPE),
-            ("dup2", 99, 0),
-            "close",
-            ("exec", "ffmpeg", ntsc.build_ffmpeg_cmd(cfg, HW)),
-        ])
-        self.assertIn("pipe:0", self.events[-1][2])
-        self.assertTrue(self.lock_held)
-        self.assertTrue(self.lock_inheritable)
+    def test_tunes_then_supervises_under_the_lock(self):
+        self.assertEqual(self.stream(), 143)             # supervise()'s code is the exit code
+        (run,) = self.supervised
+        self.assertTrue(run["lock_held"])
+        self.assertTrue(run["tuned_first"])
+        self.assertTrue(run["via_cat"])
+        self.assertEqual(run["cmd"], ntsc.build_ffmpeg_cmd(self.cfg, HW))
         self.assertIn("--set-freq=175.2500", self.fake.opts())
         self.assertIn("streaming us-bcast:7 (tuner 175.250 MHz) via HW-MPEG", self.stderr)
+        self.assertFalse(self.lock_is_held(self.cfg["LOCK_FILE"]))   # released after
 
-    def test_direct_exec_without_cat(self):
+    def test_cat_only_for_hw_encoder_with_capture_via_cat(self):
         self.stream(CAPTURE_VIA_CAT="0")
-        self.assertEqual(len(self.events), 1)
-        kind, file, argv = self.events[0]
-        self.assertEqual((kind, file), ("exec", "ffmpeg"))
-        self.assertIn("/dev/video0", argv)
-        self.assertTrue(self.lock_held)
-        self.assertTrue(self.lock_inheritable)
-
-    def test_raw_device_never_uses_cat(self):
         with mock.patch.object(ntsc, "device_info", return_value=RAW):
             self.stream(RAW_AUDIO_DEV="hw:1,0")
-        self.assertEqual([e[0] for e in self.events], ["exec"])
+        self.assertEqual([r["via_cat"] for r in self.supervised], [False, False])
         self.assertIn("via raw-encode", self.stderr)
 
     def test_line_input(self):
@@ -274,32 +225,33 @@ class CmdStream(unittest.TestCase):
     def test_video_bitrate_only_on_hw(self):
         self.stream(VIDEO_BITRATE="6000000")
         self.assertIn("--set-ctrl=video_bitrate=6000000", self.fake.opts())
-        self.close_locks()   # the first "ffmpeg" exits, releasing the tuner
         self.fake.calls.clear()
         with mock.patch.object(ntsc, "device_info", return_value=RAW):
             self.stream(VIDEO_BITRATE="6000000", RAW_AUDIO_DEV="hw:1,0")
         self.assertFalse(any("video_bitrate" in o for o in self.fake.opts()))
 
-    def test_tune_failure_releases_lock_and_does_not_exec(self):
+    def test_tune_failure_releases_lock_and_does_not_supervise(self):
         self.fake.fail.add("--set-freq")
+        cfg = make_cfg(self.tmp.name)
         with self.assertRaises(ntsc.ChannelError):
-            self.stream()
-        self.assertEqual(self.events, [])
-        self.assertFalse(self.lock_is_held(self.locks[0].path))
+            ntsc.cmd_stream(cfg, argparse.Namespace(channel="us-bcast:7", wait=None))
+        self.assertEqual(self.supervised, [])
+        self.assertFalse(self.lock_is_held(cfg["LOCK_FILE"]))
 
     def test_busy_tuner(self):
         cfg = make_cfg(self.tmp.name)
         with ntsc.TunerLock(cfg["LOCK_FILE"]):
             with self.assertRaisesRegex(ntsc.ChannelError, "busy"):
-                self.stream(wait=0)
-        self.assertEqual(self.events, [])
+                ntsc.cmd_stream(cfg, argparse.Namespace(channel="us-bcast:7", wait=0))
+        self.assertEqual(self.supervised, [])
         self.assertEqual(self.fake.opts(), [])
 
     def test_bad_channel_fails_before_touching_device(self):
         with self.assertRaises(ntsc.ChannelError):
-            self.stream("us-bcast:99")
-        self.assertEqual(self.events, [])
-        self.assertEqual(self.locks, [])
+            ntsc.cmd_stream(make_cfg(self.tmp.name),
+                            argparse.Namespace(channel="us-bcast:99", wait=None))
+        self.assertEqual(self.supervised, [])
+        self.assertEqual(self.fake.calls, [])
 
 
 if __name__ == "__main__":

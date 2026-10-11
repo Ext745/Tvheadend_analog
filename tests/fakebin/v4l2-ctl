@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""Fake v4l2-ctl: answers from tests/fixtures (FAKE_CARD=hvr1950|800e); everything else succeeds."""
+import os, sys
+
+fixtures = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fixtures")
+card = os.environ.get("FAKE_CARD", "hvr1950")
+files = {"--all": f"v4l2-all-{card}.txt", "--list-inputs": f"v4l2-list-inputs-{card}.txt",
+         "--get-tuner": "v4l2-get-tuner-nosignal.txt"}
+for arg in sys.argv[1:]:
+    if arg in files:
+        with open(os.path.join(fixtures, files[arg])) as fh:
+            sys.stdout.write(fh.read())
+# --get-freq prints nothing, so ntsc-tvh trusts --set-freq

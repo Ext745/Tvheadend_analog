@@ -28,6 +28,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -55,6 +56,8 @@ DEFAULTS = {
                                       #   ffmpeg builds, letting ffmpeg open the MPEG node directly
                                       #   yields an empty stream; feeding it via cat is reliable.
                                       #   Set 0 only if your build reads the node directly just fine.
+    "STOP_GRACE":    "1",             # seconds ffmpeg gets to exit after SIGTERM before SIGKILL.
+                                      #   Some ffmpeg builds never exit on SIGTERM with an ALSA input.
     # scanning --------------------------------------------------------------- #
     "SCAN_TABLES":   "us-bcast,us-cable",   # comma list scanned by default
     "SCAN_METHOD":   "signal",        # signal | video | both
@@ -433,45 +436,97 @@ def autodetect_alsa(cfg, info):
     return ""
 
 
+try:
+    import ctypes
+    _LIBC = ctypes.CDLL(None)          # resolved in the parent; used in the child after fork
+except Exception:
+    _LIBC = None
+
+
+def _die_with_parent():
+    """Popen preexec_fn: ask the kernel to SIGKILL this child when ntsc-tvh dies, even if
+    ntsc-tvh itself is SIGKILLed, so a capture process can never outlive it and keep the
+    device busy. Linux-only (prctl PR_SET_PDEATHSIG); silently skipped elsewhere."""
+    try:
+        _LIBC.prctl(1, signal.SIGKILL)          # 1 = PR_SET_PDEATHSIG
+    except Exception:
+        pass
+
+
+def _stop(procs, grace):
+    """SIGTERM every live child, give them `grace` seconds, then SIGKILL the rest."""
+    for p in procs:
+        if p.poll() is None:
+            p.terminate()
+    deadline = time.monotonic() + grace
+    for p in procs:
+        try:
+            p.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+
+
+def supervise(cfg, cmd, lock, via_cat):
+    """Run ffmpeg (fed by `cat DEV` when via_cat) as children and return an exit code.
+
+    ntsc-tvh stays the process TVHeadend started, so TVHeadend's stop signal lands here.
+    On SIGTERM/SIGINT/SIGHUP the children get SIGTERM, then SIGKILL after STOP_GRACE --
+    ffmpeg itself can't be trusted to exit (e.g. ffmpeg 6.1 with an em28xx ALSA input
+    blocks forever on audio once video stops). ffmpeg inherits our stdout, so the stream
+    goes straight to TVHeadend, and it also inherits the tuner lock, so the lock is only
+    released once every process using the tuner is gone."""
+    stop = []
+
+    def on_signal(signum, frame):
+        stop.append(signum)
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, on_signal)
+    procs = []
+    try:
+        stdin = None
+        if via_cat:
+            cat = subprocess.Popen(["cat", cfg["DEVICE"]], stdout=subprocess.PIPE,
+                                   preexec_fn=_die_with_parent)
+            procs.append(cat)
+            stdin = cat.stdout
+        ff = subprocess.Popen(cmd, stdin=stdin, pass_fds=(lock.fh.fileno(),),
+                              preexec_fn=_die_with_parent)
+        procs.insert(0, ff)
+        if via_cat:
+            cat.stdout.close()                   # ffmpeg holds the read end now
+        while not stop:
+            try:
+                rc = ff.wait(timeout=0.25)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+        else:
+            rc = 128 + stop[0]
+    finally:
+        _stop(procs, float(cfg["STOP_GRACE"]))
+    return 128 - rc if rc < 0 else rc            # killed by signal N -> 128+N, like a shell
+
+
 def cmd_stream(cfg, args):
     chan = parse_channel(args.channel)
     info = device_info(cfg)
     wait = float(args.wait if args.wait is not None else cfg["SCAN_LOCK_WAIT"])
-    # Hold the lock only across tuning; then exec ffmpeg (directly, or with a cat
-    # child feeding its stdin) so TVHeadend's SIGTERM reaches ffmpeg and the tuner
-    # is released cleanly when the subscription ends.
-    lock = TunerLock(cfg["LOCK_FILE"], wait=wait)
-    lock.__enter__()
-    try:
+    with TunerLock(cfg["LOCK_FILE"], wait=wait) as lock:
         tune(cfg, chan)
         if cfg["VIDEO_BITRATE"] and info["hw_encoder"]:
             v4l2(cfg, f"--set-ctrl=video_bitrate={cfg['VIDEO_BITRATE']}")
         time.sleep(0.4)  # let the encoder settle before TVH starts reading
+        # cmd already reads "pipe:0" when the cat path is in use (see build_ffmpeg_cmd).
         cmd = build_ffmpeg_cmd(cfg, info)
-    except Exception:
-        lock.__exit__()
-        raise
-    # NB: we intentionally do NOT release the flock here. We replace this process
-    # with ffmpeg (or the cat|ffmpeg pipeline); the lock fd is held by ffmpeg until
-    # it exits, which is exactly the lifetime of the subscription. Python marks fds
-    # non-inheritable by default (PEP 446), so we must explicitly let it cross exec().
-    os.set_inheritable(lock.fh.fileno(), True)
-    sys.stderr.write(f"ntsc-tvh: streaming {chan['id']} "
-                     f"({'tuner '+format(chan['freq'],'.3f')+' MHz' if chan['freq'] else chan['input']}) "
-                     f"via {'HW-MPEG' if info['hw_encoder'] else 'raw-encode'}\n")
-    sys.stderr.flush()
-    if info["hw_encoder"] and cfg["CAPTURE_VIA_CAT"] == "1":
-        # Feed the device through `cat` into ffmpeg's stdin rather than letting ffmpeg
-        # open the node itself (which is empty/unreliable on some ffmpeg builds).
-        # We spawn cat as a child, wire its output to our fd 0, then exec ffmpeg in
-        # place: ffmpeg keeps our PID (so TVHeadend's SIGTERM hits it directly and the
-        # tuner lock is released cleanly) and inherits our stdout (pipe:1 -> TVHeadend).
-        # cmd already has its input rewritten to "pipe:0" by build_ffmpeg_cmd().
-        cat = subprocess.Popen(["cat", cfg["DEVICE"]], stdout=subprocess.PIPE)
-        os.dup2(cat.stdout.fileno(), 0)
-        cat.stdout.close()
-        os.execvp(cmd[0], cmd)
-    os.execvp(cmd[0], cmd)
+        via_cat = info["hw_encoder"] and cfg["CAPTURE_VIA_CAT"] == "1"
+        sys.stderr.write(f"ntsc-tvh: streaming {chan['id']} "
+                         f"({'tuner '+format(chan['freq'],'.3f')+' MHz' if chan['freq'] else chan['input']}) "
+                         f"via {'HW-MPEG' if info['hw_encoder'] else 'raw-encode'}\n")
+        sys.stderr.flush()
+        rc = supervise(cfg, cmd, lock, via_cat)
+    sys.exit(rc)
 
 
 # --------------------------------------------------------------------------- #
@@ -490,7 +545,8 @@ def video_variance(cfg, info, frames=6):
     cmd = [cfg["FFMPEG"], "-hide_banner", "-loglevel", "error", *src,
            "-an", "-vf", "fps=2,scale=160:120,format=gray",
            "-frames:v", str(frames), "-f", "rawvideo", "pipe:1"]
-    cat = subprocess.Popen(["cat", cfg["DEVICE"]], stdout=subprocess.PIPE) if via_cat else None
+    cat = (subprocess.Popen(["cat", cfg["DEVICE"]], stdout=subprocess.PIPE,
+                            preexec_fn=_die_with_parent) if via_cat else None)
     try:
         r = subprocess.run(cmd, stdin=cat.stdout if cat else None,
                            capture_output=True, timeout=8)
