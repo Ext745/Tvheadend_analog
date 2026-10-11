@@ -1,8 +1,0 @@
-Driver Info:
-	Driver name      : em28xx
-	Card type        : Pinnacle PCTV HD Pro Stick
-	Bus info         : usb-0000:00:1d.0-1.3
-Format Video Capture:
-	Width/Height      : 720/480
-	Pixel Format      : 'YUYV' (YUYV 4:2:2)
-	Field             : Interlaced

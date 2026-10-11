@@ -270,15 +270,31 @@ def set_standard(cfg):
     return False
 
 
+def set_freq(cfg, mhz):
+    """Tune to `mhz` and confirm the tuner actually moved there.
+    Some tuners accept --set-freq (exit 0) but stay put -- e.g. an xc3028 whose
+    firmware failed to load reads back 0 MHz, which would otherwise look exactly
+    like an empty channel."""
+    r = v4l2(cfg, f"--set-freq={mhz:.4f}")
+    if r.returncode != 0:
+        raise ChannelError(f"set-freq failed: {r.stderr.strip() or r.stdout.strip()}")
+    r = v4l2(cfg, "--get-freq")
+    m = re.search(r"\(([\d.]+) MHz\)", r.stdout) if r.returncode == 0 else None
+    if m is None:
+        return                      # driver can't report it; trust set-freq
+    got = float(m.group(1))
+    if abs(got - mhz) > 0.0625:     # V4L2 tuner step is 62.5 kHz
+        raise ChannelError(f"tuner did not tune: asked for {mhz:.3f} MHz, device reports "
+                           f"{got:.3f} MHz (tuner firmware missing? check dmesg)")
+
+
 def tune(cfg, chan):
     """Select input, standard, and (for tuner channels) frequency."""
     idx = resolve_input_index(cfg, chan["input"])
     v4l2(cfg, f"--set-input={idx}")
     set_standard(cfg)
     if chan["kind"] == "tuner":
-        r = v4l2(cfg, f"--set-freq={chan['freq']:.4f}")
-        if r.returncode != 0:
-            raise ChannelError(f"set-freq failed: {r.stderr.strip() or r.stdout.strip()}")
+        set_freq(cfg, chan["freq"])
 
 
 def get_signal(cfg):
@@ -363,23 +379,58 @@ def build_ffmpeg_cmd(cfg, info):
     return cmd
 
 
+SYS_ROOT = "/sys"
+USB_INTERFACE = re.compile(r"^\d+-[\d.]+:\d+\.\d+$")   # e.g. 1-1:1.0 (vs a USB device, 1-1)
+
+
+def _hw_device(sysdev):
+    """The physical device behind a sysfs device path: a USB interface collapses to its
+    USB device (video and audio may sit on sibling interfaces); PCI paths stay as-is."""
+    return os.path.dirname(sysdev) if USB_INTERFACE.match(os.path.basename(sysdev)) else sysdev
+
+
+def alsa_from_sysfs(cfg):
+    """ALSA capture device on the same physical device as the video node, via sysfs."""
+    node = os.path.basename(os.path.realpath(cfg["DEVICE"]))
+    vdev = os.path.join(SYS_ROOT, "class", "video4linux", node, "device")
+    if not os.path.exists(vdev):
+        return ""
+    want = _hw_device(os.path.realpath(vdev))
+    sound = os.path.join(SYS_ROOT, "class", "sound")
+    try:
+        cards = sorted(n for n in os.listdir(sound) if re.fullmatch(r"card\d+", n))
+    except OSError:
+        return ""
+    for card in cards:
+        cdir = os.path.join(sound, card)
+        if _hw_device(os.path.realpath(os.path.join(cdir, "device"))) != want:
+            continue
+        pcms = sorted((int(m.group(2)), int(m.group(1))) for m in
+                      (re.fullmatch(r"pcmC(\d+)D(\d+)c", n) for n in os.listdir(cdir)) if m)
+        if pcms:
+            devno, cardno = pcms[0]
+            return f"hw:{cardno},{devno}"
+    return ""
+
+
 def autodetect_alsa(cfg, info):
+    """ALSA device for the raw path: the card on the same USB/PCI device as the video
+    node, else an `arecord -l` card named like the tuner/driver, else "" (no audio).
+    Never guesses the first card -- that is usually the host's own sound chip."""
+    adev = alsa_from_sysfs(cfg)
+    if adev:
+        return adev
     r = run(["arecord", "-l"])
     if r.returncode != 0:
         return ""
-    # Prefer a card whose name resembles the tuner card.
-    want = info["card"].split()[0].lower() if info["card"] != "?" else ""
-    best = None
+    want = [w.lower() for w in (info["card"].split()[:1] + [info["driver"]]) if w != "?"]
     for line in r.stdout.splitlines():
-        m = re.search(r"card (\d+):\s*(\S+).*device (\d+)", line)
+        m = re.search(r"card (\d+):\s*(\S+)\s*\[([^\]]*)\].*device (\d+)", line)
         if m:
-            cardno, cardname, devno = m.group(1), m.group(2), m.group(3)
-            cand = f"hw:{cardno},{devno}"
-            if best is None:
-                best = cand
-            if want and want in cardname.lower():
-                return cand
-    return best or ""
+            names = (m.group(2) + " " + m.group(3)).lower()
+            if any(w in names for w in want):
+                return f"hw:{m.group(1)},{m.group(4)}"
+    return ""
 
 
 def cmd_stream(cfg, args):
@@ -505,7 +556,9 @@ def cmd_scan(cfg, args):
             idx = resolve_input_index(cfg, "television")
             v4l2(cfg, f"--set-input={idx}")
             for c in cands:
-                v4l2(cfg, f"--set-freq={c['freq']:.4f}")
+                # A tuner that won't tune is a device fault, not an empty channel: abort
+                # (keeping the previous state/M3U) rather than save an empty scan.
+                set_freq(cfg, c["freq"])
                 time.sleep(dwell)
                 active, metrics = is_active(cfg, info, c, method, thr, var_min)
                 tag = "ACTIVE" if active else "  --  "

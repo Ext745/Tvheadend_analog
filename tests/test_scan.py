@@ -179,6 +179,18 @@ class CmdScan(unittest.TestCase):
             self.scan(tables="us-bcast,eu-pal")
         self.assertEqual(self.fake.calls, [])
 
+    def test_tuner_that_does_not_tune_aborts_and_keeps_previous_state(self):
+        # Saving an empty scan here would rewrite the M3U without any channels.
+        previous = self.scan()
+        self.fake.stuck = True
+        self.fake.freq = None
+        with self.assertRaises(SystemExit) as cm:
+            self.scan()
+        self.assertIn("did not tune", str(cm.exception.code))
+        with open(self.cfg["STATE_FILE"]) as fh:
+            self.assertEqual(json.load(fh), previous)
+        self.assertEqual(len([o for o in self.fake.opts() if o.startswith("--set-freq")]), 68 + 1)
+
     def test_busy_tuner_aborts_without_touching_state(self):
         cfg = make_cfg(self.tmp.name)
         with ntsc.TunerLock(cfg["LOCK_FILE"]):

@@ -1,0 +1,27 @@
+ioctl: VIDIOC_ENUMINPUT
+	Input       : 0
+	Name        : Television
+	Type        : 0x00000001 (Tuner)
+	Audioset    : 0x00000003
+	Tuner       : 0x00000000
+	Standard    : 0x0000000000FFFFFF (PAL-B/B1/G/H/I/D/D1/K/M/N/Nc/60 NTSC-M/M-JP/443/M-KR SECAM-B/D/G/H/K/K1/L/Lc)
+	Status      : 0x00000000 (ok)
+	Capabilities: 0x00000004 (SDTV standards)
+
+	Input       : 1
+	Name        : Composite
+	Type        : 0x00000002 (Camera)
+	Audioset    : 0x00000003
+	Tuner       : 0x00000000
+	Standard    : 0x0000000000FFFFFF (PAL-B/B1/G/H/I/D/D1/K/M/N/Nc/60 NTSC-M/M-JP/443/M-KR SECAM-B/D/G/H/K/K1/L/Lc)
+	Status      : 0x00000000 (ok)
+	Capabilities: 0x00000004 (SDTV standards)
+
+	Input       : 2
+	Name        : S-Video
+	Type        : 0x00000002 (Camera)
+	Audioset    : 0x00000003
+	Tuner       : 0x00000000
+	Standard    : 0x0000000000FFFFFF (PAL-B/B1/G/H/I/D/D1/K/M/N/Nc/60 NTSC-M/M-JP/443/M-KR SECAM-B/D/G/H/K/K1/L/Lc)
+	Status      : 0x00000000 (ok)
+	Capabilities: 0x00000004 (SDTV standards)

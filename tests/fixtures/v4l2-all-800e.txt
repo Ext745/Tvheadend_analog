@@ -1,0 +1,69 @@
+Driver Info:
+	Driver name      : em28xx
+	Card type        : Pinnacle PCTV HD Pro Stick
+	Bus info         : usb-0000:00:14.0-1
+	Driver version   : 7.0.14
+	Capabilities     : 0x85230011
+		Video Capture
+		VBI Capture
+		Tuner
+		Audio
+		Read/Write
+		Streaming
+		Extended Pix Format
+		Device Capabilities
+	Device Caps      : 0x05230001
+		Video Capture
+		Tuner
+		Audio
+		Read/Write
+		Streaming
+		Extended Pix Format
+Priority: 2
+Frequency for tuner 0: 9076 (567.250000 MHz)
+Tuner 0:
+	Name                 : Tuner
+	Type                 : Analog TV
+	Capabilities         : 62.5 kHz multi-standard freq-bands 
+	Frequency range      : 44.000 MHz - 958.000 MHz
+	Signal strength/AFC  : 0%/0
+	Current audio mode   : mono
+	Available subchannels: 
+Video input : 0 (Television: ok)
+Audio input : 0 (Television)
+Video Standard = 0x000000ff
+	PAL-B/B1/G/H/I/D/D1/K
+Format Video Capture:
+	Width/Height      : 720/576
+	Pixel Format      : 'YUYV' (YUYV 4:2:2)
+	Field             : Interlaced
+	Bytes per Line    : 1440
+	Size Image        : 829440
+	Colorspace        : SMPTE 170M
+	Transfer Function : Default (maps to Rec. 709)
+	YCbCr/HSV Encoding: Default (maps to ITU-R 601)
+	Quantization      : Default (maps to Limited Range)
+	Flags             : 
+Streaming Parameters Video Capture:
+	Capabilities     : timeperframe
+	Frames per second: 25.000 (25/1)
+	Read buffers     : 4
+
+User Controls
+
+                     brightness 0x00980900 (int)    : min=0 max=255 step=1 default=128 value=128 flags=slider, has-min-max
+                       contrast 0x00980901 (int)    : min=0 max=255 step=1 default=128 value=128 flags=slider, has-min-max
+                     saturation 0x00980902 (int)    : min=0 max=255 step=1 default=128 value=128 flags=slider, has-min-max
+                            hue 0x00980903 (int)    : min=-128 max=127 step=1 default=0 value=0 flags=slider, has-min-max
+                         volume 0x00980905 (int)    : min=0 max=31 step=1 default=31 value=31 flags=slider, has-min-max
+                           mute 0x00980909 (bool)   : default=1 value=1 flags=has-min-max
+                    red_balance 0x0098090e (int)    : min=-48 max=48 step=1 default=0 value=0 flags=slider, has-min-max
+                   blue_balance 0x0098090f (int)    : min=-48 max=48 step=1 default=0 value=0 flags=slider, has-min-max
+                      sharpness 0x0098091b (int)    : min=0 max=15 step=1 default=0 value=0 flags=slider, has-min-max
+
+Image Processing Controls
+
+                     pixel_rate 0x009f0902 (int64)  : min=27000000 max=27000000 step=1 default=27000000 value=27000000 flags=read-only, has-min-max
+                   test_pattern 0x009f0903 (menu)   : min=0 max=1 default=0 value=0 (Disabled) flags=has-min-max
+				0: Disabled
+				1: Black screen

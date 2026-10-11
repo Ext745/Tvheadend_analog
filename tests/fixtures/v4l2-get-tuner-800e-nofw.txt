@@ -1,0 +1,8 @@
+Tuner 0:
+	Name                 : Tuner
+	Type                 : Analog TV
+	Capabilities         : 62.5 kHz multi-standard freq-bands 
+	Frequency range      : 44.000 MHz - 958.000 MHz
+	Signal strength/AFC  : 0%/0
+	Current audio mode   : mono
+	Available subchannels: 

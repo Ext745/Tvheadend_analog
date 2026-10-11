@@ -455,13 +455,24 @@ input streams = 1**, and disable muxes that have no live signal. `SCAN_LOCK_WAIT
 (default 5s) gives a stream a brief grace period to acquire the tuner instead of
 failing instantly.
 
+**`tuner did not tune: asked for X MHz, device reports 0.000 MHz`.** The driver
+accepted the frequency but the tuner never moved. This is almost always tuner
+firmware that failed to load. For example, the Pinnacle 800e (em28xx + xc3028)
+needs `xc3028-v27.fw` in `/lib/firmware/`, which Ubuntu's `linux-firmware` does not
+ship. `dmesg` shows `Could not load firmware xc3028-v27.fw`. Composite and S-Video
+still work without it. `scan` aborts on this error and keeps the previous
+state/M3U, so it never saves an empty channel list.
+
 **`signal` always reads 0%.** Some driver/tuner combos don't populate the field.
 Switch `SCAN_METHOD=video` (or `both`) and lean on the picture heuristic.
 
 **No audio / wrong audio.** On the HVR-1950 audio is baked into the MPEG-2 PS;
 `AUDIO_CODEC=copy` is correct. Switch to `ac3` only if a downstream player
-insists. For raw cards audio comes from ALSA — set `RAW_AUDIO_DEV` if auto-detect
-picks the wrong card.
+insists. For raw cards audio comes from ALSA. Auto-detect picks the sound card on the same
+USB/PCI device as the video node (via `/sys`), falling back to an `arecord -l` card
+named like the tuner or driver. If neither matches, it uses **no** audio and `doctor`
+flags it, so it never captures the host's own sound chip. Set `RAW_AUDIO_DEV=hw:N,D`
+to choose explicitly (e.g. a card cabled into the PC's line-in).
 
 **Auto-network keeps recreating muxes / losing channel maps.** Something is
 changing the pipe:// URLs between playlist reads — the URL is the mux's identity.
@@ -529,6 +540,14 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
   ffmpeg open it directly (empty on some ffmpeg builds, so every channel looked flat).
 - **`ntsc-tvh signal input:composite`** selects the input and says there is no RF
   signal to measure, instead of crashing.
+- **Raw cards get their own audio.** ALSA auto-detect used to fall back to the
+  first sound card, which is usually the host's built-in audio. A Pinnacle 800e
+  streamed the PC's mic input while `doctor` said "all good". It now matches the
+  card via sysfs (see §11).
+- **Tuning is verified.** After `--set-freq`, the tool reads the frequency back.
+  A tuner that didn't move (e.g. missing xc3028 firmware) is now an error, not
+  "0% signal". `scan` aborts instead of overwriting the playlist with nothing.
+  Drivers that can't report the frequency are trusted as before.
 
 ---
 
@@ -547,7 +566,8 @@ output parsing, the ffmpeg command line, the `cat | ffmpeg` exec handoff with th
 inheritable tuner lock, scan → state → M3U, and the exact `pipe://` URL format. CI
 (`.github/workflows/test.yml`) runs them on Python 3.10–3.14 on every push.
 
-The fixtures are modelled on `v4l2-ctl` output, not captured from the real box. To
+The `*-800e.txt` fixtures were captured from a real Pinnacle 800e (em28xx). The
+HVR-1950 ones are modelled on `v4l2-ctl` output, not captured from the real box. To
 pin them to the real hardware, capture these on the OptiPlex and replace the
 matching `tests/fixtures/*.txt` files:
 

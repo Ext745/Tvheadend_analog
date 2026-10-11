@@ -60,18 +60,21 @@ class FakeV4L2:
     """Stands in for ntsc.run(): answers v4l2-ctl calls from fixtures and records them.
 
     `signal_for` maps a tuned frequency (MHz, float) to the --get-tuner fixture text;
-    untuned/unknown frequencies get the no-signal fixture.
+    untuned/unknown frequencies get the no-signal fixture. `stuck=True` makes --set-freq
+    succeed without moving the tuner (an xc3028 with no firmware reads back 0 MHz).
     """
 
     def __init__(self, all_fixture="v4l2-all-hvr1950.txt",
                  inputs_fixture="v4l2-list-inputs-hvr1950.txt",
-                 signal_for=None, fail=()):
+                 signal_for=None, fail=(), stuck=False):
         self.all_out = fixture(all_fixture)
         self.inputs_out = fixture(inputs_fixture)
         self.locked = fixture("v4l2-get-tuner-locked.txt")
         self.nosignal = fixture("v4l2-get-tuner-nosignal.txt")
         self.signal_for = signal_for or {}
         self.fail = set(fail)        # option prefixes that should return rc=1
+        self.stuck = stuck
+        self.freq_out = None         # set to override the --get-freq output text
         self.calls = []
         self.freq = None
 
@@ -85,8 +88,14 @@ class FakeV4L2:
         if opt == "--list-inputs":
             return completed(cmd, self.inputs_out)
         if opt.startswith("--set-freq="):
-            self.freq = float(opt.split("=", 1)[1])
+            if not self.stuck:
+                self.freq = float(opt.split("=", 1)[1])
             return completed(cmd)
+        if opt == "--get-freq":
+            if self.freq_out is not None:
+                return completed(cmd, self.freq_out)
+            mhz = self.freq or 0.0
+            return completed(cmd, f"Frequency for tuner 0: {round(mhz * 16)} ({mhz:.6f} MHz)\n")
         if opt == "--get-tuner":
             hit = self.signal_for.get(round(self.freq, 4)) if self.freq is not None else None
             return completed(cmd, hit or self.nosignal)

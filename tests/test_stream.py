@@ -6,6 +6,7 @@ Nothing here execs or opens a device: os.execvp, os.dup2 and subprocess.Popen ar
 import argparse
 import io
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -68,19 +69,93 @@ class BuildFfmpegCmd(unittest.TestCase):
         self.assertEqual(cmd.count("-i"), 1)
 
 
+USB = "devices/pci0000:00/0000:00:14.0/usb1"
+HDA = "devices/pci0000:00/0000:00:1f.3"
+
+
 class AutodetectAlsa(unittest.TestCase):
+    """Sound card lookup for the raw path. The sysfs tree mirrors a real 800e on a
+    Tiger Lake laptop: video0 and ALSA card1 both under USB interface 1-1:1.0, and
+    the host's HDA codec as card0 (the card the old name-guessing picked)."""
 
-    def test_prefers_card_matching_tuner_name(self):
-        with mock.patch.object(ntsc, "run", return_value=completed([], fixture("arecord-l.txt"))):
-            self.assertEqual(ntsc.autodetect_alsa(make_cfg(), RAW), "hw:1,0")
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.sys = os.path.join(self.tmp.name, "sys")
+        for target, kw in (("SYS_ROOT", {"new": self.sys}),
+                           ("run", {"return_value": completed([], fixture("arecord-l-800e.txt"))})):
+            p = mock.patch.object(ntsc, target, **kw)
+            p.start()
+            self.addCleanup(p.stop)
+        self.dev = os.path.join(self.tmp.name, "dev")
+        os.makedirs(self.dev)
+        self.video("video0", f"{USB}/1-1/1-1:1.0")
+        self.card(0, HDA, [0, 2])
 
-    def test_falls_back_to_first_card(self):
-        with mock.patch.object(ntsc, "run", return_value=completed([], fixture("arecord-l.txt"))):
-            self.assertEqual(ntsc.autodetect_alsa(make_cfg(), dict(RAW, card="?")), "hw:0,0")
+    def video(self, node, parent):
+        self.link(f"class/video4linux/{node}", f"{parent}/video4linux/{node}")
+        os.symlink(os.path.join(self.sys, parent), os.path.join(self.sys, parent,
+                                                                "video4linux", node, "device"))
+        open(os.path.join(self.dev, node), "w").close()
+
+    def card(self, n, parent, capture_devs):
+        cdir = self.link(f"class/sound/card{n}", f"{parent}/sound/card{n}")
+        os.symlink(os.path.join(self.sys, parent), os.path.join(cdir, "device"))
+        for d in capture_devs:
+            os.mkdir(os.path.join(cdir, f"pcmC{n}D{d}c"))
+        os.mkdir(os.path.join(cdir, f"pcmC{n}D0p"))    # playback nodes are ignored
+
+    def link(self, cls, real):
+        real = os.path.join(self.sys, real)
+        os.makedirs(real, exist_ok=True)
+        cls = os.path.join(self.sys, cls)
+        os.makedirs(os.path.dirname(cls), exist_ok=True)
+        os.symlink(real, cls)
+        return cls
+
+    def detect(self, node="video0", info=None):
+        cfg = make_cfg(DEVICE=os.path.join(self.dev, node))
+        return ntsc.autodetect_alsa(cfg, info or RAW)
+
+    def test_800e_card_on_same_usb_interface(self):
+        self.card(1, f"{USB}/1-1/1-1:1.0", [0])
+        self.assertEqual(self.detect(), "hw:1,0")
+
+    def test_audio_on_sibling_usb_interface(self):
+        # e.g. snd-usb-audio bound to interface 1.1 of the same stick
+        self.card(1, f"{USB}/1-1/1-1:1.1", [0])
+        self.assertEqual(self.detect(), "hw:1,0")
+
+    def test_other_usb_device_does_not_match(self):
+        self.card(1, f"{USB}/1-2/1-2:1.0", [0])       # a USB headset on another port
+        with mock.patch.object(ntsc, "run", return_value=completed([], returncode=1)):
+            self.assertEqual(self.detect(), "")
+
+    def test_pci_capture_card(self):
+        self.video("video1", "devices/pci0000:00/0000:03:00.0")
+        self.card(2, "devices/pci0000:00/0000:03:00.0", [1, 0])
+        self.assertEqual(self.detect("video1"), "hw:2,0")
+
+    def test_device_given_as_by_id_symlink(self):
+        self.card(1, f"{USB}/1-1/1-1:1.0", [0])
+        link = os.path.join(self.dev, "usb-Pinnacle_Systems_PCTV_800e-video-index0")
+        os.symlink(os.path.join(self.dev, "video0"), link)
+        self.assertEqual(self.detect(os.path.basename(link)), "hw:1,0")
+
+    def test_falls_back_to_arecord_name_match(self):
+        # No sysfs (e.g. a container without /sys/class/sound): match card or driver name.
+        shutil.rmtree(os.path.join(self.sys, "class", "sound"))
+        self.assertEqual(self.detect(), "hw:1,0")     # "Em28xxAudio" ~ driver em28xx
+
+    def test_never_guesses_the_hosts_sound_chip(self):
+        # Before the fix this returned hw:0,0 (the HDA codec) and doctor said "all good".
+        shutil.rmtree(os.path.join(self.sys, "class", "sound"))
+        self.assertEqual(self.detect(info=dict(RAW, driver="cx231xx", card="Hauppauge USB")), "")
 
     def test_no_arecord(self):
+        shutil.rmtree(os.path.join(self.sys, "class", "sound"))
         with mock.patch.object(ntsc, "run", return_value=completed([], returncode=1)):
-            self.assertEqual(ntsc.autodetect_alsa(make_cfg(), RAW), "")
+            self.assertEqual(self.detect(), "")
 
 
 class Exec(Exception):

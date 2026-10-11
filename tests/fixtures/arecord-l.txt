@@ -1,7 +1,0 @@
-**** List of CAPTURE Hardware Devices ****
-card 0: PCH [HDA Intel PCH], device 0: ALC3234 Analog [ALC3234 Analog]
-  Subdevices: 1/1
-  Subdevice #0: subdevice #0
-card 1: Pinnacle [Pinnacle PCTV HD Pro], device 0: USB Audio [USB Audio]
-  Subdevices: 1/1
-  Subdevice #0: subdevice #0

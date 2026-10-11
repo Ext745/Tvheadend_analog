@@ -31,12 +31,16 @@ class DeviceInfo(DeviceTestCase):
         self.assertEqual(info["inputs"], [(0, "television"), (1, "radio"),
                                           (2, "s-video"), (3, "composite")])
 
-    def test_raw_device(self):
-        self.use(FakeV4L2(all_fixture="v4l2-all-raw.txt"))
+    def test_pinnacle_800e_is_raw(self):
+        # Captured from a real 800e (em28xx card=17); it powers up in PAL 720x576.
+        self.use(FakeV4L2(all_fixture="v4l2-all-800e.txt",
+                          inputs_fixture="v4l2-list-inputs-800e.txt"))
         info = ntsc.device_info(make_cfg())
         self.assertEqual(info["driver"], "em28xx")
+        self.assertEqual(info["card"], "Pinnacle PCTV HD Pro Stick")
         self.assertEqual(info["pixfmt"], "YUYV")
         self.assertFalse(info["hw_encoder"])
+        self.assertEqual(info["inputs"], [(0, "Television"), (1, "Composite"), (2, "S-Video")])
 
     def test_probe_failure_raises(self):
         self.use(FakeV4L2(fail=["--all"]))
@@ -61,6 +65,13 @@ class Inputs(DeviceTestCase):
         self.assertEqual(ntsc.resolve_input_index(cfg, "television"), 0)
         self.assertEqual(ntsc.resolve_input_index(cfg, "svideo"), 2)
         self.assertEqual(ntsc.resolve_input_index(cfg, "composite"), 3)
+
+    def test_resolve_800e(self):
+        self.use(FakeV4L2(inputs_fixture="v4l2-list-inputs-800e.txt"))
+        cfg = make_cfg()
+        self.assertEqual(ntsc.resolve_input_index(cfg, "television"), 0)
+        self.assertEqual(ntsc.resolve_input_index(cfg, "composite"), 1)
+        self.assertEqual(ntsc.resolve_input_index(cfg, "svideo"), 2)
 
     def test_resolve_alternate_names(self):
         fake = self.use(FakeV4L2())
@@ -94,6 +105,11 @@ class Signal(DeviceTestCase):
         self.use(FakeV4L2())
         self.assertEqual(ntsc.get_signal(make_cfg()), (0, 0))
 
+    def test_800e_without_firmware(self):
+        fake = self.use(FakeV4L2())
+        fake.nosignal = fixture("v4l2-get-tuner-800e-nofw.txt")
+        self.assertEqual(ntsc.get_signal(make_cfg()), (0, 0))
+
     def test_unparseable_or_failed(self):
         fake = self.use(FakeV4L2())
         fake.nosignal = "Tuner 0:\n\tName : something else\n"
@@ -108,13 +124,37 @@ class Tune(DeviceTestCase):
         fake = self.use(FakeV4L2())
         ntsc.tune(make_cfg(), ntsc.parse_channel("us-cable-hrc:5"))
         self.assertEqual(fake.opts(), ["--list-inputs", "--set-input=0",
-                                       "--set-standard=ntsc", "--set-freq=78.0000"])
+                                       "--set-standard=ntsc", "--set-freq=78.0000",
+                                       "--get-freq"])
 
     def test_line_input_does_not_set_frequency(self):
         fake = self.use(FakeV4L2())
         ntsc.tune(make_cfg(), ntsc.parse_channel("input:composite"))
         self.assertIn("--set-input=3", fake.opts())
         self.assertFalse(any(o.startswith("--set-freq") for o in fake.opts()))
+
+    def test_tuner_that_does_not_move_raises(self):
+        # e.g. 800e with xc3028-v27.fw missing: --set-freq exits 0, --get-freq says 0 MHz.
+        self.use(FakeV4L2(stuck=True))
+        with self.assertRaisesRegex(ntsc.ChannelError,
+                                    r"asked for 175\.250 MHz, device reports 0\.000 MHz.*firmware"):
+            ntsc.tune(make_cfg(), ntsc.parse_channel("us-bcast:7"))
+
+    def test_readback_within_one_tuner_step_is_accepted(self):
+        fake = self.use(FakeV4L2())
+        fake.freq_out = "Frequency for tuner 0: 2805 (175.312500 MHz)\n"   # +62.5 kHz
+        ntsc.tune(make_cfg(), ntsc.parse_channel("us-bcast:7"))
+        fake.freq_out = "Frequency for tuner 0: 2806 (175.375000 MHz)\n"   # +125 kHz
+        with self.assertRaises(ntsc.ChannelError):
+            ntsc.tune(make_cfg(), ntsc.parse_channel("us-bcast:7"))
+
+    def test_unreportable_frequency_trusts_set_freq(self):
+        # Drivers that can't report the frequency must not be broken by the check.
+        self.use(FakeV4L2(stuck=True, fail=["--get-freq"]))
+        ntsc.tune(make_cfg(), ntsc.parse_channel("us-bcast:7"))
+        fake = self.use(FakeV4L2(stuck=True))
+        fake.freq_out = "something unexpected\n"
+        ntsc.tune(make_cfg(), ntsc.parse_channel("us-bcast:7"))
 
     def test_set_freq_failure_raises(self):
         self.use(FakeV4L2(fail=["--set-freq"]))
@@ -148,6 +188,11 @@ class CmdSignal(DeviceTestCase):
         self.use(FakeV4L2(signal_for={175.25: fixture("v4l2-get-tuner-locked.txt")}))
         self.assertEqual(self.signal("us-bcast:7"),
                          "us-bcast:7  175.250 MHz  signal=87%  afc=-12 Hz\n")
+
+    def test_tuner_that_does_not_move(self):
+        self.use(FakeV4L2(stuck=True))
+        with self.assertRaisesRegex(ntsc.ChannelError, "did not tune"):
+            self.signal("us-bcast:7")
 
     def test_line_input_selects_input_without_measuring(self):
         fake = self.use(FakeV4L2())

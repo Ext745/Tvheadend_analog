@@ -1,0 +1,10 @@
+**** List of CAPTURE Hardware Devices ****
+card 0: PCH [HDA Intel PCH], device 0: ALC3246 Analog [ALC3246 Analog]
+  Subdevices: 1/1
+  Subdevice #0: subdevice #0
+card 0: PCH [HDA Intel PCH], device 2: ALC3246 Alt Analog [ALC3246 Alt Analog]
+  Subdevices: 1/1
+  Subdevice #0: subdevice #0
+card 1: Em28xxAudio [Em28xx Audio], device 0: Em28xx Audio [Empia 28xx Capture]
+  Subdevices: 1/1
+  Subdevice #0: subdevice #0
