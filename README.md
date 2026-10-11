@@ -461,6 +461,7 @@ a `# comment` after whitespace is ignored. The most useful:
 | `SCAN_VAR_MIN`         | `12`                             | video scan: min contrast (rejects flat screens) |
 | `SCAN_NOISE_MAX`       | `0.60`                           | video scan: max spatial noise of a picture |
 | `SCAN_MOTION_MAX`      | `0.9`                            | video scan: max frame-to-frame change of a picture |
+| `DVB_GUARD`            | `1`                              | refuse analog while the same tuner's DVB side is busy |
 | `SCAN_TABLES`          | `us-bcast,us-cable`              | plans walked by `scan`                    |
 | `SCAN_METHOD`          | `signal`                        | `signal`/`video`/`both`                   |
 | `SCAN_THRESHOLD`       | `35`                             | signal % cutoff                           |
@@ -506,17 +507,34 @@ the OTA EPG grabber** in TVHeadend when you want analog. One tuner can't expose
 both modes at once.
 
 **em28xx cards (Pinnacle 800e): analog + ATSC at once wedges the tuner until
-replug.** Unlike pvrusb2, em28xx does *not* refuse the second user. An analog
-stream started while TVHeadend had the DVB side tuned (an OTA EPG grab on one
-ATSC mux) left the stick's I2C bus wedged. `dmesg` filled with `lgdt330x ...
+replug.** Unlike pvrusb2, em28xx does *not* refuse the second user. Two ways it
+went wrong in testing:
+- Composite streaming while TVHeadend ran an OTA EPG grab on an ATSC mux.
+- An RF analog retune while an **idle** TVHeadend merely held `frontend0` open:
+  the xc3028 flipped between analog and ATSC firmware every second.
+
+Either way the stick's I2C bus wedged. `dmesg` filled with `lgdt330x ...
 i2c_read_demod_bytes ... error (ret == -6)`, TVHeadend logged `FE_READ_STATUS
-error No such device or address`, and every analog tune then failed with
-`tuner did not tune ... 0.000 MHz`. That persisted after TVHeadend was stopped
-and was only cleared by unplugging the stick. Composite/S-Video kept working.
-On a shared box, disable TVHeadend's OTA EPG grabbers (**Configuration → Channel
-/ EPG → EPG Grabber Modules**: the PSIP and EIT over-the-air modules) and
-**Force initial EPG grab at start-up**, and keep the ATSC network's idle scan
-off.
+error No such device or address`, and every analog tune failed with `tuner did
+not tune ... 0.000 MHz`. Only unplugging the stick cleared it.
+
+`ntsc-tvh` now refuses instead (`DVB_GUARD=1`, the default): `the digital (DVB)
+side of this tuner is in use: tvheadend (pid N) has the DVB frontend open ...`.
+RF channels are refused while anything holds the DVB frontend open;
+composite/S-Video only while DVB is actually receiving (demux/dvr open). The
+check runs before ntsc-tvh opens the analog node at all: on the em28xx, even
+`v4l2-ctl` opening `/dev/video0` switches the card to analog mode and broke a
+live ATSC stream in testing. `doctor` reports the DVB state too, and skips its
+device probe while digital is receiving.
+
+The guard only covers one direction. If TVHeadend starts a DVB subscription (a
+recording, a client, an EPG grab) while an analog stream is already running,
+nothing stops it, because TVHeadend doesn't know about ntsc-tvh. On a shared
+stick, avoid scheduling ATSC while analog is in use. To share the stick with TVHeadend's ATSC side, set the
+adapter's **Power save** on (TVHeadend then closes the tuner when idle) and turn
+off **Over-the-air EPG**, **Idle scan** and **Initial scan** for it
+(**Configuration → DVB Inputs → TV adapters**), or disable the global over-the-air
+EPG grabber modules. Analog and ATSC still can't be used *at the same time*.
 
 **`PermissionError: [Errno 13] ... '/run/lock/ntsc-tvh.lock'`** (or any lock
 path). The user TVHeadend runs as can't create the lock file. The default
@@ -654,6 +672,9 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
   contrast alone, so on tuners that show snow (the 800e) every empty channel
   was "active". It now also checks spatial noise and frame-to-frame motion
   (`SCAN_NOISE_MAX`, `SCAN_MOTION_MAX`; see §7).
+- **Hybrid-card guard (`DVB_GUARD`).** On a card whose analog and digital sides
+  share one tuner, `tune`, `signal`, `stream` and every channel of `scan` refuse
+  to start while the DVB side is busy, instead of wedging the card (see §11).
 - **Quieter TVHeadend log.** The `ntsc-tvh: streaming …` status line is only
   printed when stderr is a terminal. TVHeadend logs every stderr line from a pipe
   at ERROR level, so each channel start used to show up as an error. Real errors

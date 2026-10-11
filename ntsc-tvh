@@ -29,6 +29,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import statistics
 import subprocess
 import sys
@@ -71,6 +72,8 @@ DEFAULTS = {
     "SCAN_LOCK_WAIT": "5",            # seconds to wait for the tuner lock (0 = abort if busy).
                                       #   Small wait smooths brief contention (scan vs. live view).
     "INPUTS_ALWAYS_ACTIVE": "1",      # 1 = composite/svideo always appear in lists/m3u
+    "DVB_GUARD":     "1",             # 1 = refuse analog use while the DVB side of the same tuner is
+                                      #   in use (hybrid cards like the 800e can wedge until replug)
 }
 
 CONF_PATH = "/etc/ntsc-tvh.conf"
@@ -297,6 +300,7 @@ def set_freq(cfg, mhz):
 
 def tune(cfg, chan):
     """Select input, standard, and (for tuner channels) frequency."""
+    check_dvb_idle(cfg, chan["kind"] == "tuner")
     idx = resolve_input_index(cfg, chan["input"])
     v4l2(cfg, f"--set-input={idx}")
     set_standard(cfg)
@@ -396,13 +400,20 @@ def _hw_device(sysdev):
     return os.path.dirname(sysdev) if USB_INTERFACE.match(os.path.basename(sysdev)) else sysdev
 
 
-def alsa_from_sysfs(cfg):
-    """ALSA capture device on the same physical device as the video node, via sysfs."""
+def _video_hw_device(cfg):
+    """The physical device (sysfs path) behind cfg DEVICE, or None if sysfs doesn't say."""
     node = os.path.basename(os.path.realpath(cfg["DEVICE"]))
     vdev = os.path.join(SYS_ROOT, "class", "video4linux", node, "device")
     if not os.path.exists(vdev):
+        return None
+    return _hw_device(os.path.realpath(vdev))
+
+
+def alsa_from_sysfs(cfg):
+    """ALSA capture device on the same physical device as the video node, via sysfs."""
+    want = _video_hw_device(cfg)
+    if want is None:
         return ""
-    want = _hw_device(os.path.realpath(vdev))
     sound = os.path.join(SYS_ROOT, "class", "sound")
     try:
         cards = sorted(n for n in os.listdir(sound) if re.fullmatch(r"card\d+", n))
@@ -418,6 +429,87 @@ def alsa_from_sysfs(cfg):
             devno, cardno = pcms[0]
             return f"hw:{cardno},{devno}"
     return ""
+
+
+PROC_ROOT = "/proc"
+
+
+def dvb_users(cfg):
+    """Who has the DVB side of the same physical device open.
+
+    Returns {kind: [(pid, comm), ...]} for kind in frontend/demux/dvr/net. The DVB nodes
+    come from sysfs (same USB/PCI device as DEVICE); open files are matched by device
+    number in /proc/*/fd, so it works across a container's mount namespace. Processes of
+    other users (unreadable /proc/PID/fd) are not seen."""
+    want = _video_hw_device(cfg)
+    if want is None:
+        return {}
+    dvb = os.path.join(SYS_ROOT, "class", "dvb")
+    nodes = {}
+    try:
+        names = os.listdir(dvb)
+    except OSError:
+        return {}
+    for name in names:
+        m = re.fullmatch(r"dvb\d+\.([a-z]+)\d+", name)
+        if not m or _hw_device(os.path.realpath(os.path.join(dvb, name, "device"))) != want:
+            continue
+        try:
+            with open(os.path.join(dvb, name, "dev")) as fh:
+                major, minor = (int(x) for x in fh.read().split(":"))
+        except (OSError, ValueError):
+            continue
+        nodes[os.makedev(major, minor)] = m.group(1)
+    users = {}
+    if not nodes:
+        return users
+    for pid in sorted((p for p in os.listdir(PROC_ROOT) if p.isdigit()), key=int):
+        if int(pid) == os.getpid():
+            continue
+        fddir = os.path.join(PROC_ROOT, pid, "fd")
+        try:
+            fds = os.listdir(fddir)
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                st = os.stat(os.path.join(fddir, fd))
+            except OSError:
+                continue
+            kind = nodes.get(st.st_rdev) if stat.S_ISCHR(st.st_mode) else None
+            if kind:
+                try:
+                    with open(os.path.join(PROC_ROOT, pid, "comm")) as fh:
+                        comm = fh.read().strip()
+                except OSError:
+                    comm = "?"
+                if (int(pid), comm) not in users.setdefault(kind, []):
+                    users[kind].append((int(pid), comm))
+    return users
+
+
+def check_dvb_idle(cfg, rf):
+    """Refuse analog use while the DVB side of the same tuner is busy (DVB_GUARD=1).
+
+    On hybrid cards whose analog and digital sides share one tuner (em28xx + xc3028 in
+    the Pinnacle 800e) the driver doesn't stop both being used. Retuning the analog side
+    while anything holds the DVB frontend open -- even an idle TVHeadend -- makes the
+    tuner flip between analog and ATSC firmware and wedges the card's I2C bus until it is
+    unplugged. Line inputs don't retune, so for them only active DVB reception
+    (demux/dvr open) counts."""
+    if cfg["DVB_GUARD"] != "1":
+        return
+    users = dvb_users(cfg)
+    busy = ("frontend", "demux", "dvr") if rf else ("demux", "dvr")
+    hits = [(k, pid, comm) for k in busy for pid, comm in users.get(k, [])]
+    if not hits:
+        return
+    who = ", ".join(sorted({f"{comm} (pid {pid}) has the DVB {k} open" for k, pid, comm in hits}))
+    raise ChannelError(
+        f"the digital (DVB) side of this tuner is in use: {who}. Analog and digital share one "
+        "tuner on this device and using both at once can wedge it until it is unplugged. In "
+        "TVHeadend, turn on 'Power save' for this adapter (it then closes the tuner when idle) "
+        "or disable the adapter. Set DVB_GUARD=0 to skip this check.")
 
 
 def autodetect_alsa(cfg, info):
@@ -515,6 +607,7 @@ def supervise(cfg, cmd, lock, via_cat):
 
 def cmd_stream(cfg, args):
     chan = parse_channel(args.channel)
+    check_dvb_idle(cfg, chan["kind"] == "tuner")   # before device_info() opens the node
     info = device_info(cfg)
     wait = float(args.wait if args.wait is not None else cfg["SCAN_LOCK_WAIT"])
     with TunerLock(cfg["LOCK_FILE"], wait=wait) as lock:
@@ -645,6 +738,7 @@ def cmd_scan(cfg, args):
     dwell = float(args.dwell if args.dwell is not None else cfg["SCAN_DWELL"])
     wait = float(args.wait if args.wait is not None else cfg["SCAN_LOCK_WAIT"])
 
+    check_dvb_idle(cfg, rf=True)                    # before device_info() opens the node
     info = device_info(cfg)
     cands = all_channels(tables)
     found = []
@@ -657,8 +751,9 @@ def cmd_scan(cfg, args):
             idx = resolve_input_index(cfg, "television")
             v4l2(cfg, f"--set-input={idx}")
             for c in cands:
-                # A tuner that won't tune is a device fault, not an empty channel: abort
-                # (keeping the previous state/M3U) rather than save an empty scan.
+                # A tuner that won't tune (or one the DVB side grabbed mid-scan) is a device
+                # fault, not an empty channel: abort, keeping the previous state/M3U.
+                check_dvb_idle(cfg, rf=True)
                 set_freq(cfg, c["freq"])
                 time.sleep(dwell)
                 active, metrics = is_active(cfg, info, c, method, thr)
@@ -827,19 +922,30 @@ def cmd_doctor(cfg, args):
     if os.path.exists(cfg["DEVICE"]):
         chk("device readable", os.access(cfg["DEVICE"], os.R_OK),
             "add the tvheadend user to the 'video' group if not")
-        try:
-            info = device_info(cfg)
-            chk("driver detected", info["driver"] != "?", info["driver"])
-            print(f"       card:    {info['card']}")
-            print(f"       pixfmt:  {info['pixfmt']}  "
-                  f"({'hardware MPEG encoder' if info['hw_encoder'] else 'raw frames -> software encode'})")
-            ins = ", ".join(f"{i}:{n}" for i, n in info["inputs"]) or "none"
-            print(f"       inputs:  {ins}")
-            if not info["hw_encoder"]:
-                adev = cfg["RAW_AUDIO_DEV"] or autodetect_alsa(cfg, info)
-                chk("ALSA audio device (raw path)", bool(adev), adev or "set RAW_AUDIO_DEV")
-        except ChannelError as exc:
-            chk("device probe", False, str(exc))
+        users = dvb_users(cfg) if cfg["DVB_GUARD"] == "1" else {}
+        held = "; ".join(f"{k}: " + ", ".join(f"{c} ({p})" for p, c in v)
+                         for k, v in sorted(users.items()))
+        if "demux" in users or "dvr" in users:
+            # Even opening the analog node switches an em28xx out of digital mode.
+            chk("DVB side of this tuner idle", False,
+                f"{held} -- digital is receiving, so the device probe was skipped")
+        else:
+            try:
+                info = device_info(cfg)
+                chk("driver detected", info["driver"] != "?", info["driver"])
+                print(f"       card:    {info['card']}")
+                print(f"       pixfmt:  {info['pixfmt']}  "
+                      f"({'hardware MPEG encoder' if info['hw_encoder'] else 'raw frames -> software encode'})")
+                ins = ", ".join(f"{i}:{n}" for i, n in info["inputs"]) or "none"
+                print(f"       inputs:  {ins}")
+                if not info["hw_encoder"]:
+                    adev = cfg["RAW_AUDIO_DEV"] or autodetect_alsa(cfg, info)
+                    chk("ALSA audio device (raw path)", bool(adev), adev or "set RAW_AUDIO_DEV")
+            except ChannelError as exc:
+                chk("device probe", False, str(exc))
+            if users:
+                chk("DVB side of this tuner idle", False,
+                    f"{held} -- RF tuning will be refused (see README: 'Power save')")
     print("status:", "all good" if ok else "issues found")
     sys.exit(0 if ok else 1)
 
