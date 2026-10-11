@@ -932,6 +932,35 @@ def cmd_status(cfg, args):
     print(f"timer:      {timer_status()}")
 
 
+CAPTURE_TEST_FRAMES = 4
+
+
+def doctor_capture(cfg, info, chk):
+    """Capture a few frames the way stream/scan do -- the check that catches a card that
+    tunes but streams nothing (encoder firmware missing, firmware2 failed on xHCI).
+    Doesn't retune: it shows whatever input/channel the card is on."""
+    try:
+        with TunerLock(cfg["LOCK_FILE"], wait=0):
+            t0 = time.monotonic()
+            data = capture_gray(cfg, info, frames=CAPTURE_TEST_FRAMES)
+            took = time.monotonic() - t0
+    except (ChannelError, OSError):
+        print("       capture: skipped -- the tuner is in use (a stream or scan holds the lock)")
+        return
+    if len(data) < CAPTURE_TEST_FRAMES * FRAME_W * FRAME_H:
+        hint = ("the hardware encoder sent no video. Check `dmesg | grep -i pvrusb2` for "
+                "'firmware2 upload transfer failure' (USB-3/xHCI path, README §2) and that "
+                "v4l-cx2341x-enc.fw is installed" if info["hw_encoder"] else
+                "no frames from the device; check `dmesg` and that nothing else is capturing")
+        chk("capture test", False, hint)
+        return
+    m = picture_metrics(data, float(cfg["SCAN_VAR_MIN"]))
+    seen = ("a picture" if looks_like_picture(m, cfg) else
+            "a flat screen" if m["noise"] is None else "snow/noise")
+    note = "" if seen == "a picture" else " (no signal on the current input/channel?)"
+    chk("capture test", True, f"{CAPTURE_TEST_FRAMES} frames in {took:.1f} s, showing {seen}{note}")
+
+
 def cmd_doctor(cfg, args):
     ok = True
     def chk(label, good, detail=""):
@@ -954,6 +983,7 @@ def cmd_doctor(cfg, args):
             chk("DVB side of this tuner idle", False,
                 f"{held} -- digital is receiving, so the device probe was skipped")
         else:
+            info = None
             try:
                 info = device_info(cfg)
                 chk("driver detected", info["driver"] != "?", info["driver"])
@@ -970,6 +1000,8 @@ def cmd_doctor(cfg, args):
             if users:
                 chk("DVB side of this tuner idle", False,
                     f"{held} -- RF tuning will be refused (see README: 'Power save')")
+            elif info and not getattr(args, "no_capture", False):
+                doctor_capture(cfg, info, chk)
     print("status:", "all good" if ok else "issues found")
     sys.exit(0 if ok else 1)
 
@@ -1043,7 +1075,9 @@ def build_parser():
                                 description="Analog NTSC tuning/streaming/scanning for TVHeadend pipe:// muxes")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sp = sub.add_parser("doctor", help="check device, codecs, permissions")
+    sp = sub.add_parser("doctor", help="check device, codecs, permissions, and capture")
+    sp.add_argument("--no-capture", action="store_true",
+                    help="skip the few-second capture test")
     sp.set_defaults(func=cmd_doctor)
 
     sp = sub.add_parser("list", help="list channels")

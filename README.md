@@ -170,7 +170,12 @@ ntsc-tvh doctor
 
 `doctor` confirms `ffmpeg`/`v4l2-ctl` are present, the device is readable, the
 driver, whether it's a **hardware MPEG** node or a **raw** node, the available
-inputs, and (for raw cards) the ALSA capture device.
+inputs, and (for raw cards) the ALSA capture device. Then it **captures four
+frames** the way `stream` does, from whatever input/channel the card is on (it
+doesn't retune), and says whether it saw a picture, a flat screen or snow. A card
+that tunes but sends no video fails here, with a pointer to the usual causes
+(encoder firmware, USB-3 path). It skips the capture while a stream or scan holds
+the tuner or the card's digital side is open; `--no-capture` skips it always.
 
 ---
 
@@ -736,6 +741,7 @@ build. Several produce the *same* surface symptom ("empty stream / mux scan
 fails"), so the trick is isolating the layer — work top-down.
 
 **Tunes and reports signal, but every channel produces an empty stream.**
+`ntsc-tvh doctor` now catches this (`[!!] capture test`).
 This has several distinct causes that look identical; check them in order:
 
 1. *`dmesg | grep -i pvrusb2` shows `firmware2 upload transfer failure`* — the
@@ -996,6 +1002,10 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
   of a Python traceback.
 - **`examples/analog-check`** checks one channel that carries a real analog picture
   from end to end, and leaves a report of pictures and fixture files (§14).
+- **`doctor` captures a few frames.** It used to say "all good" for a card whose
+  encoder sent nothing (seen in testing: firmware2 failing on an xHCI port). It now captures
+  four frames like `stream` does and fails if none arrive, or reports picture / flat
+  screen / snow.
 - **Stream profiles start ~4 s sooner.** Each spawn profile's ffmpeg analysed ~5 s of
   TVHeadend's stream before encoding. Bounded to 1 s (5 MB cap): through TVHeadend on the
   HVR-1950, analog profiles now send their first byte in 0.6–1.0 s (was ~4.6 s) and
