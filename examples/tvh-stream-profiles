@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
-# tvh-analog-profiles - create TVHeadend stream (+ codec) profiles tuned for analog (ntsc-tvh)
+# tvh-stream-profiles - create TVHeadend stream (+ codec, DVR) profiles for analog channels
+# (from ntsc-tvh) and digital ATSC channels
 #
 # Analog channels from ntsc-tvh arrive as 720x480 4:3 MPEG-2 with MP2 audio: interlaced
 # from a hardware encoder (HVR-1950), already deinterlaced from the raw path (800e).
-# Kodi (HTSP) and VLC play that as-is; browsers and many phones/IPTV apps don't. These
-# profiles transcode to H.264/AAC (and, on fast enough machines, H.265, AV1, an upscaled
-# 59.94p H.264, and GPU-encoded VAAPI versions), deinterlacing only frames that are actually interlaced and
-# keeping the 4:3 shape. TVHeadend's stock "webtv" profiles scale to 384 lines and
-# don't deinterlace.
+# Digital ATSC channels are 1080i/1080p/720p60/480i MPEG-2 with AC-3 (often 5.1). Kodi
+# and VLC play both as-is; browsers and many phones/IPTV apps don't. These profiles
+# transcode to H.264 (and, where the machine can keep up, H.265, AV1, an upscaled 59.94p
+# H.264 for analog, and GPU-encoded VAAPI versions), deinterlacing only frames that are
+# actually interlaced and keeping the picture shape. TVHeadend's stock "webtv" profiles
+# scale everything to 384 lines and don't deinterlace. Also H.264 DVR profiles.
 #
-#   tvh-analog-profiles [--url http://host:9981] [--user U --password P] [--dry-run]
-#                       [--min-speed 2.0 | --all] [--vaapi-device /dev/dri/renderD128]
-#   tvh-analog-profiles --remove            # delete the profiles again
+#   tvh-stream-profiles [--url http://host:9981] [--user U --password P] [--dry-run]
+#                       [--sources analog,digital] [--min-speed 2.0 | --all]
+#                       [--vaapi-device /dev/dri/renderD128]
+#   tvh-stream-profiles --remove            # delete the profiles again
 #
-# Run it where TVHeadend's ffmpeg runs -- e.g. `docker exec tvheadend tvh-analog-profiles`
-# -- so the speed test for the heavier profiles measures the machine that will encode.
+# Run it where TVHeadend's ffmpeg runs -- e.g. `docker exec tvheadend tvh-stream-profiles`
+# -- so the speed/GPU test for the heavier profiles measures the machine that will encode.
 # Creates the profiles, or updates them in place if one with the same name exists.
 # Standard library only.
 #
@@ -89,6 +92,11 @@ X264 = "-c:v libx264 -preset veryfast -pix_fmt yuv420p"
 # decode + bwdif on the CPU, then upload, for GPUs/drivers that can't deinterlace.
 VAAPI_GPU = "-hwaccel vaapi -hwaccel_device {dev} -hwaccel_output_format vaapi"
 VAAPI_UPLOAD = "-vaapi_device {dev}"
+# h264_vaapi/hevc_vaapi fail ("Encode failed: -28") when the source carries ATSC (A/53)
+# closed captions, because they try to copy them into an SEI. So the GPU profiles leave
+# captions out; the software (x264/x265) profiles keep them.
+H264_VAAPI = "-c:v h264_vaapi -sei identifier+timing+recovery_point"
+HEVC_VAAPI = "-c:v hevc_vaapi -sei hdr"
 
 
 def vaapi(gpu_vf, sw_vf, venc):
@@ -132,11 +140,11 @@ SPAWN = [
     # encode finds out, and a profile the GPU can't do is skipped.
     {"name": "analog-h264-vaapi-mpegts", "gated": True, "vaapi": True, "mime": "video/mp2t",
      "fmt": "mpegts", "comment": "Analog: H.264/AAC in MPEG-TS, encoded on the GPU (VAAPI)",
-     "variants": vaapi("deinterlace_vaapi=auto=1", "bwdif=0:-1:1", "-c:v h264_vaapi -qp 24 -g 60"),
+     "variants": vaapi("deinterlace_vaapi=auto=1", "bwdif=0:-1:1", f"{H264_VAAPI} -qp 24 -g 60"),
      "aenc": AAC.format(160)},
     {"name": "analog-h265-vaapi-mpegts", "gated": True, "vaapi": True, "mime": "video/mp2t",
      "fmt": "mpegts", "comment": "Analog: H.265/AAC in MPEG-TS, encoded on the GPU (VAAPI)",
-     "variants": vaapi("deinterlace_vaapi=auto=1", "bwdif=0:-1:1", "-c:v hevc_vaapi -qp 26 -g 60"),
+     "variants": vaapi("deinterlace_vaapi=auto=1", "bwdif=0:-1:1", f"{HEVC_VAAPI} -qp 26 -g 60"),
      "aenc": AAC.format(160)},
     {"name": "analog-av1-vaapi-webm", "gated": True, "vaapi": True, "mime": "video/webm",
      "fmt": "webm", "comment": "Analog: AV1/Opus in WebM, encoded on the GPU (VAAPI)",
@@ -147,12 +155,12 @@ SPAWN = [
      "fmt": "mpegts", "comment": "Analog: 360-line H.264/AAC, ~1 Mb/s, encoded on the GPU (VAAPI)",
      "variants": vaapi_scaled("deinterlace_vaapi=auto=1", "bwdif=0:-1:1",
                               "scale_vaapi=w=540:h=360",
-                              "-c:v h264_vaapi -rc_mode VBR -b:v 900k -maxrate 1200k -g 60"),
+                              f"{H264_VAAPI} -rc_mode VBR -b:v 900k -maxrate 1200k -g 60"),
      "aenc": AAC.format(96)},
     {"name": "analog-h264-vaapi-720p60", "gated": True, "vaapi": True, "mime": "video/mp2t",
      "fmt": "mpegts", "comment": "Analog: 59.94p, upscaled to 960x720 H.264/AAC, on the GPU (VAAPI)",
      "variants": vaapi_scaled("deinterlace_vaapi=rate=field:auto=1", "bwdif=1:-1:1",
-                              "scale_vaapi=w=960:h=720", "-c:v h264_vaapi -qp 23 -g 120"),
+                              "scale_vaapi=w=960:h=720", f"{H264_VAAPI} -qp 26 -g 120"),
      "aenc": AAC.format(160)},
     # For the DVR (see DVR below): a slower preset and higher quality than live viewing,
     # since nobody waits for it, at roughly a third of the MPEG-2 size. MPEG-TS so a
@@ -164,9 +172,69 @@ SPAWN = [
     {"name": "analog-h264-vaapi-rec", "gated": True, "vaapi": True, "mime": "video/mp2t",
      "fmt": "mpegts",
      "comment": "Analog recordings: H.264/AAC 192k, encoded on the GPU (DVR profile 'Analog H.264 (GPU)')",
-     "variants": vaapi("deinterlace_vaapi=auto=1", "bwdif=0:-1:1", "-c:v h264_vaapi -qp 21 -g 60"),
+     "variants": vaapi("deinterlace_vaapi=auto=1", "bwdif=0:-1:1", f"{H264_VAAPI} -qp 24 -g 60"),
      "aenc": AAC.format(192)},
-]
+] + [dict(p, source="digital") for p in [
+    # Quality settings were chosen by measuring size and SSIM against the deinterlaced
+    # source on real broadcast content: each keeps SSIM above a plain MPEG-2 re-encode
+    # of the same content while saving space (README 6b has the table).
+    # Digital (ATSC) channels: 1080i/1080p/720p60/480i MPEG-2 with AC-3 (often 5.1) and
+    # extra language/description tracks. Main audio track only (the first one). "ac3"
+    # profiles copy it untouched -- 5.1 stays 5.1, for Kodi, TVs and home theatres; "aac"
+    # profiles downmix to stereo for browsers and phones. Deinterlace 1080i to 1080p29.97;
+    # 720p60 passes through. All gated: 1080 is ~5x the work of analog SD, so the test
+    # (on a synthetic 1080i clip) decides what a given PC can do.
+    {"name": "digital-h264-ac3-mpegts", "gated": True, "mime": "video/mp2t", "fmt": "mpegts",
+     "comment": "Digital: H.264 + original AC-3 (5.1 kept) in MPEG-TS (Kodi, TVs, IPTV apps)",
+     "vf": "bwdif=0:-1:1", "venc": f"{X264} -crf 25 -g 60", "aenc": "-c:a copy"},
+    {"name": "digital-h264-aac-mpegts", "gated": True, "mime": "video/mp2t", "fmt": "mpegts",
+     "comment": "Digital: H.264 + AAC stereo in MPEG-TS (phones, VLC, IPTV apps without AC-3)",
+     "vf": "bwdif=0:-1:1", "venc": f"{X264} -crf 25 -g 60", "aenc": AAC.format(160)},
+    {"name": "digital-h265-ac3-mpegts", "gated": True, "mime": "video/mp2t", "fmt": "mpegts",
+     "comment": "Digital: H.265 + original AC-3 in MPEG-TS (Kodi, newer TVs; ~half the H.264 bitrate)",
+     "vf": "bwdif=0:-1:1",
+     "venc": "-c:v libx265 -preset veryfast -crf 28 -g 60 -pix_fmt yuv420p -x265-params log-level=error",
+     "aenc": "-c:a copy"},
+    {"name": "digital-av1-opus-webm", "gated": True, "mime": "video/webm", "fmt": "webm",
+     "comment": "Digital: AV1 + Opus stereo in WebM (Chrome, Firefox, newer phones and TVs)",
+     "vf": "bwdif=0:-1:1", "venc": "-c:v libsvtav1 -preset 10 -crf 38 -g 60 -pix_fmt yuv420p",
+     "aenc": OPUS},
+    {"name": "digital-mobile", "gated": True, "mime": "video/mp2t", "fmt": "mpegts",
+     "comment": "Digital: 540-line H.264 + AAC stereo, ~1.5 Mb/s (phones, remote viewing)",
+     "vf": "bwdif=0:-1:1,scale=-2:540",
+     "venc": f"{X264} -b:v 1500k -maxrate 2000k -bufsize 3000k -g 60", "aenc": AAC.format(96)},
+    {"name": "digital-h264-rec", "gated": True, "mime": "video/mp2t", "fmt": "mpegts",
+     "comment": "Digital recordings: H.264 + original AC-3 in MPEG-TS (DVR profile 'Digital H.264')",
+     "vf": "bwdif=0:-1:1", "venc": "-c:v libx264 -preset faster -crf 25 -g 60 -pix_fmt yuv420p",
+     "aenc": "-c:a copy"},
+    {"name": "digital-h264-vaapi-ac3-mpegts", "gated": True, "vaapi": True, "mime": "video/mp2t",
+     "fmt": "mpegts", "comment": "Digital: H.264 + original AC-3, encoded on the GPU (VAAPI)",
+     "variants": vaapi("deinterlace_vaapi=auto=1", "bwdif=0:-1:1", f"{H264_VAAPI} -qp 28 -g 60"),
+     "aenc": "-c:a copy"},
+    {"name": "digital-h264-vaapi-aac-mpegts", "gated": True, "vaapi": True, "mime": "video/mp2t",
+     "fmt": "mpegts", "comment": "Digital: H.264 + AAC stereo, encoded on the GPU (VAAPI)",
+     "variants": vaapi("deinterlace_vaapi=auto=1", "bwdif=0:-1:1", f"{H264_VAAPI} -qp 28 -g 60"),
+     "aenc": AAC.format(160)},
+    {"name": "digital-h265-vaapi-ac3-mpegts", "gated": True, "vaapi": True, "mime": "video/mp2t",
+     "fmt": "mpegts", "comment": "Digital: H.265 + original AC-3, encoded on the GPU (VAAPI)",
+     "variants": vaapi("deinterlace_vaapi=auto=1", "bwdif=0:-1:1", f"{HEVC_VAAPI} -qp 29 -g 60"),
+     "aenc": "-c:a copy"},
+    {"name": "digital-av1-vaapi-webm", "gated": True, "vaapi": True, "mime": "video/webm",
+     "fmt": "webm", "comment": "Digital: AV1 + Opus stereo in WebM, encoded on the GPU (VAAPI)",
+     "variants": vaapi("deinterlace_vaapi=auto=1", "bwdif=0:-1:1",
+                       "-c:v av1_vaapi -rc_mode VBR -b:v 4000k -maxrate 6000k -g 60"),
+     "aenc": OPUS},
+    {"name": "digital-mobile-vaapi", "gated": True, "vaapi": True, "mime": "video/mp2t",
+     "fmt": "mpegts", "comment": "Digital: 540-line H.264 + AAC stereo, ~1.5 Mb/s, on the GPU (VAAPI)",
+     "variants": vaapi_scaled("deinterlace_vaapi=auto=1", "bwdif=0:-1:1", "scale_vaapi=w=-2:h=540",
+                              f"{H264_VAAPI} -rc_mode VBR -b:v 1500k -maxrate 2000k -g 60"),
+     "aenc": AAC.format(96)},
+    {"name": "digital-h264-vaapi-rec", "gated": True, "vaapi": True, "mime": "video/mp2t",
+     "fmt": "mpegts",
+     "comment": "Digital recordings: H.264 + original AC-3 on the GPU (DVR profile 'Digital H.264 (GPU)')",
+     "variants": vaapi("deinterlace_vaapi=auto=1", "bwdif=0:-1:1", f"{H264_VAAPI} -qp 27 -g 60"),
+     "aenc": "-c:a copy"},
+]]
 
 # DVR profiles (Configuration -> Recording), each recording through one of the stream
 # profiles above. Created only if that stream profile exists. Storage path and file name
@@ -176,6 +244,10 @@ DVR = [
      "comment": "Record analog channels as H.264/AAC (about a third of the MPEG-2 size)"},
     {"name": "Analog H.264 (GPU)", "profile": "analog-h264-vaapi-rec",
      "comment": "Record analog channels as H.264/AAC, encoded on the GPU (VAAPI)"},
+    {"name": "Digital H.264", "profile": "digital-h264-rec",
+     "comment": "Record digital (ATSC) channels as H.264, keeping the original AC-3 audio"},
+    {"name": "Digital H.264 (GPU)", "profile": "digital-h264-vaapi-rec",
+     "comment": "Record digital (ATSC) channels as H.264 on the GPU (VAAPI), keeping AC-3"},
 ]
 
 
@@ -194,13 +266,22 @@ def spawn_cmdline(p, v, dev):
     return f"env SVT_LOG=1 {cmd}" if "libsvtav1" in v["venc"] else cmd
 
 
-def make_clip(path, seconds=4):
-    """A synthetic stand-in for an analog channel: 720x480 4:3 interlaced MPEG-2 (Main
-    profile) with light noise. Real MPEG-2, so the all-GPU variants can decode it."""
-    src = "testsrc2=size=720x480:rate=30000/1001,noise=alls=2:allf=t"
+CLIPS = {
+    # source: (size, sample aspect, MPEG-2 bitrate) -- the heaviest common format of each
+    "analog": ("720x480", "8/9", "6M"),       # 480i 4:3
+    "digital": ("1920x1080", "1/1", "15M"),   # 1080i 16:9
+}
+
+
+def make_clip(path, source="analog", seconds=4):
+    """A synthetic stand-in for a channel: interlaced MPEG-2 (Main profile) with light
+    noise, 480i 4:3 for analog or 1080i 16:9 for digital. Real MPEG-2, so the all-GPU
+    variants can decode it."""
+    size, sar, rate = CLIPS[source]
+    src = f"testsrc2=size={size}:rate=30000/1001,noise=alls=2:allf=t"
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "lavfi",
-           "-i", src, "-t", str(seconds), "-vf", "setsar=8/9", "-flags", "+ilme+ildct",
-           "-top", "1", "-c:v", "mpeg2video", "-b:v", "6M", "-pix_fmt", "yuv420p",
+           "-i", src, "-t", str(seconds), "-vf", f"setsar={sar}", "-flags", "+ilme+ildct",
+           "-top", "1", "-c:v", "mpeg2video", "-b:v", rate, "-pix_fmt", "yuv420p",
            "-f", "mpegts", path]
     try:
         return subprocess.run(cmd, capture_output=True, timeout=120).returncode == 0
@@ -290,7 +371,7 @@ class Tvh:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Create TVHeadend stream/codec profiles for analog channels")
+    ap = argparse.ArgumentParser(description="Create TVHeadend stream/codec/DVR profiles for analog and digital channels")
     ap.add_argument("--url", default="http://localhost:9981", help="TVHeadend web URL")
     ap.add_argument("--user", help="TVHeadend admin user (if authentication is on)")
     ap.add_argument("--password", help="password for --user")
@@ -300,6 +381,8 @@ def main():
                     help="create the H.265 / AV1 / 720p60 profiles only if a test encode on "
                          "this machine runs at least this many times real time (default 2.0)")
     ap.add_argument("--all", action="store_true", help="create every profile, skip the speed test")
+    ap.add_argument("--sources", default="analog,digital",
+                    help="which channel kinds to create profiles for (default analog,digital)")
     ap.add_argument("--vaapi-device", default="/dev/dri/renderD128",
                     help="VAAPI render node for the GPU profiles (default /dev/dri/renderD128)")
     args = ap.parse_args()
@@ -312,26 +395,34 @@ def main():
         tvh.remove("stream", names, tvh.existing("stream"))
         tvh.remove("codec", [c["name"] for _, c in CODECS], tvh.existing("codec"))
         return
-    have = tvh.existing("codec")
-    for cls, conf in CODECS:
-        tvh.apply("codec", cls, conf, have)
+    sources = {x.strip() for x in args.sources.split(",") if x.strip()}
+    if not sources <= set(CLIPS):
+        sys.exit(f"error: --sources takes {', '.join(CLIPS)}")
+    if "analog" in sources:            # the built-in-transcoder profiles are analog ones
+        have = tvh.existing("codec")
+        for cls, conf in CODECS:
+            tvh.apply("codec", cls, conf, have)
+        have = tvh.existing("stream")
+        for conf in TRANSCODE:
+            tvh.apply("stream", "profile-transcode", dict(conf, enabled=True), have)
     have = tvh.existing("stream")
-    for conf in TRANSCODE:
-        tvh.apply("stream", "profile-transcode", dict(conf, enabled=True), have)
     planned = set()                      # stream profiles this run creates or updates
     with tempfile.TemporaryDirectory() as tmp:
-        clip = None
+        clips = {}
         for p in SPAWN:
+            source = p.get("source", "analog")
+            if source not in sources:
+                continue
             chosen = variants(p)[0]
             if p.get("vaapi") and not args.all and not os.path.exists(args.vaapi_device):
                 print(f"skip   stream profile {p['name']}: no {args.vaapi_device} here "
                       "(pass the GPU into the container: devices: /dev/dri:/dev/dri)")
                 continue
             if p["gated"] and not args.all:
-                if clip is None:
-                    clip = os.path.join(tmp, "analog.ts")
-                    if not make_clip(clip):
-                        clip = ""
+                if source not in clips:
+                    clip = os.path.join(tmp, f"{source}.ts")
+                    clips[source] = clip if make_clip(clip, source) else ""
+                clip = clips[source]
                 chosen, notes = None, []
                 for v in variants(p):
                     speed = bench(v, args.vaapi_device, clip) if clip else None
@@ -355,7 +446,10 @@ def main():
     streams = tvh.existing("stream")
     dvrs = tvh.existing("dvr")
     default = tvh.call("idnode/load", uuid=dvrs[""])["entries"][0] if "" in dvrs else None
+    source_of = {p["name"]: p.get("source", "analog") for p in SPAWN}
     for d in DVR:
+        if source_of.get(d["profile"]) not in sources:
+            continue
         if d["profile"] not in streams and not (tvh.dry_run and d["profile"] in planned):
             print(f"skip   DVR profile {d['name']}: stream profile {d['profile']} not created")
             continue

@@ -1,4 +1,4 @@
-"""examples/tvh-analog-profiles: API calls, the speed gate, and the spawn command lines."""
+"""examples/tvh-stream-profiles: API calls, the speed gate, and the spawn command lines."""
 
 import importlib.machinery
 import importlib.util
@@ -12,12 +12,12 @@ from unittest import mock
 
 from helpers import REPO
 
-SCRIPT = os.path.join(REPO, "examples", "tvh-analog-profiles")
+SCRIPT = os.path.join(REPO, "examples", "tvh-stream-profiles")
 
 
 def load():
-    loader = importlib.machinery.SourceFileLoader("tvh_analog_profiles", SCRIPT)
-    spec = importlib.util.spec_from_loader("tvh_analog_profiles", loader)
+    loader = importlib.machinery.SourceFileLoader("tvh_stream_profiles", SCRIPT)
+    spec = importlib.util.spec_from_loader("tvh_stream_profiles", loader)
     mod = importlib.util.module_from_spec(spec)
     dont_write = sys.dont_write_bytecode
     sys.dont_write_bytecode = True
@@ -76,7 +76,7 @@ class Profiles(unittest.TestCase):
         self.gpu = os.path.join(tmp.name, "renderD128")      # stands in for /dev/dri/...
         open(self.gpu, "w").close()
 
-    def run_main(self, *argv, api=None, speed=10.0, bench=None, clip=True):
+    def run_main(self, *argv, api=None, speed=10.0, bench=None, clip=True, make_clip=None):
         api = api or FakeApi()
         out = io.StringIO()
         if not any(a.startswith("--vaapi-device") for a in argv):
@@ -84,8 +84,9 @@ class Profiles(unittest.TestCase):
         bench = bench or (lambda v, dev, clip: speed)
         with mock.patch.object(prof.Tvh, "call", side_effect=api), \
              mock.patch.object(prof, "bench", side_effect=bench) as b, \
-             mock.patch.object(prof, "make_clip", return_value=clip), \
-             mock.patch.object(sys, "argv", ["tvh-analog-profiles", *argv]), redirect_stdout(out):
+             mock.patch.object(prof, "make_clip",
+                               side_effect=make_clip or (lambda path, source: clip)), \
+             mock.patch.object(sys, "argv", ["tvh-stream-profiles", *argv]), redirect_stdout(out):
             prof.main()
         self.bench = b
         return api, out.getvalue()
@@ -99,26 +100,36 @@ class Profiles(unittest.TestCase):
 
     def test_creates_everything_on_a_fast_machine(self):
         api, _ = self.run_main()
-        self.assertEqual(self.created(api), [
+        created = self.created(api)
+        self.assertEqual(created[:3], [
             ("codec_profile/create", "libx264", "analog-h264"),
             ("codec_profile/create", "aac", "analog-aac"),
             ("profile/create", "profile-transcode", "analog-h264-aac-matroska"),
-            ("profile/create", "profile-mpegts-spawn", "analog-h264-aac-mpegts"),
-            ("profile/create", "profile-mpegts-spawn", "analog-mobile"),
-            ("profile/create", "profile-mpegts-spawn", "analog-h265-aac-mpegts"),
-            ("profile/create", "profile-mpegts-spawn", "analog-av1-opus-webm"),
-            ("profile/create", "profile-mpegts-spawn", "analog-h264-720p60"),
-            ("profile/create", "profile-mpegts-spawn", "analog-h264-vaapi-mpegts"),
-            ("profile/create", "profile-mpegts-spawn", "analog-h265-vaapi-mpegts"),
-            ("profile/create", "profile-mpegts-spawn", "analog-av1-vaapi-webm"),
-            ("profile/create", "profile-mpegts-spawn", "analog-mobile-vaapi"),
-            ("profile/create", "profile-mpegts-spawn", "analog-h264-vaapi-720p60"),
-            ("profile/create", "profile-mpegts-spawn", "analog-h264-rec"),
-            ("profile/create", "profile-mpegts-spawn", "analog-h264-vaapi-rec"),
-            ("dvr/config/create", None, "Analog H.264"),
-            ("dvr/config/create", None, "Analog H.264 (GPU)"),
         ])
-        self.assertEqual(self.bench.call_count, 9)          # only the gated ones are timed
+        spawn = [(p, c, n) for p, c, n in created if c == "profile-mpegts-spawn"]
+        self.assertEqual([n for _, _, n in spawn], [p["name"] for p in prof.SPAWN])
+        self.assertEqual([n for p, _, n in created if p == "dvr/config/create"],
+                         [d["name"] for d in prof.DVR])
+        self.assertEqual(self.bench.call_count, sum(p["gated"] for p in prof.SPAWN))
+
+    def test_sources_option(self):
+        api, out = self.run_main("--sources", "digital")
+        names = [n for _, _, n in self.created(api)]
+        self.assertTrue(names and all(n.startswith(("digital-", "Digital ")) for n in names), names)
+        self.assertNotIn("DVR profile Analog", out)
+        api, _ = self.run_main("--sources", "analog")
+        names = [n for _, _, n in self.created(api)]
+        self.assertIn("analog-h264", names)
+        self.assertFalse([n for n in names if "igital" in n])
+        with self.assertRaises(SystemExit):
+            self.run_main("--sources", "analog,dvb-s")
+
+    def test_each_source_is_tested_on_its_own_clip(self):
+        clips, seen = [], []
+        self.run_main(make_clip=lambda path, source: clips.append(source) or True,
+                      bench=lambda v, dev, clip: seen.append(os.path.basename(clip)) or 10.0)
+        self.assertEqual(clips, ["analog", "digital"])           # each made once
+        self.assertEqual(set(seen), {"analog.ts", "digital.ts"})
 
     def test_slow_machine_gets_only_the_base_profiles(self):
         api, out = self.run_main(speed=1.5)
@@ -129,18 +140,21 @@ class Profiles(unittest.TestCase):
         self.assertIn("skip   stream profile analog-av1-opus-webm: 1.5x real time, needs 2.0x", out)
 
     def test_min_speed_and_all(self):
+        everything = 3 + len(prof.SPAWN) + len(prof.DVR)
         api, _ = self.run_main("--min-speed", "1.0", speed=1.5)
-        self.assertEqual(len(self.created(api)), 17)
+        self.assertEqual(len(self.created(api)), everything)
         api, _ = self.run_main("--all", speed=0.1)
-        self.assertEqual(len(self.created(api)), 17)
+        self.assertEqual(len(self.created(api)), everything)
         self.assertEqual(self.bench.call_count, 0)
 
     def test_no_ffmpeg_skips_gated_profiles(self):
         api, out = self.run_main(clip=False)
         names = [n for _, _, n in self.created(api)]
-        self.assertEqual(len(names), 7)       # 2 codec, 4 stream (incl. recording), 1 DVR
+        # 2 codec + 4 analog stream (incl. recording) + 1 DVR; every digital one is gated
+        self.assertEqual(len(names), 7)
         self.assertIn("Analog H.264", names)
         self.assertNotIn("Analog H.264 (GPU)", names)
+        self.assertNotIn("Digital H.264", names)
         self.assertIn("run inside the TVHeadend container", out)
         self.assertEqual(self.bench.call_count, 0)
 
@@ -249,6 +263,25 @@ class SpawnCommands(unittest.TestCase):
     def test_deinterlace_only_flagged_frames_except_field_rate(self):
         self.assertIn("-vf bwdif=0:-1:1 ", self.cmd("analog-h264-aac-mpegts"))
         self.assertIn("-vf bwdif=1:-1:1,scale=960:720", self.cmd("analog-h264-720p60"))
+
+    def test_gpu_encoders_leave_out_caption_sei(self):
+        # h264_vaapi/hevc_vaapi fail on captioned ATSC when asked to copy A/53 captions
+        for p in prof.SPAWN:
+            for v in prof.variants(p):
+                with self.subTest(p["name"], variant=v["label"]):
+                    if "h264_vaapi" in v["venc"]:
+                        self.assertIn("-sei identifier+timing+recovery_point", v["venc"])
+                    if "hevc_vaapi" in v["venc"]:
+                        self.assertIn("-sei hdr", v["venc"])
+
+    def test_digital_ac3_profiles_copy_the_main_track(self):
+        for p in prof.SPAWN:
+            if p.get("source") == "digital":
+                with self.subTest(p["name"]):
+                    cmd = prof.spawn_cmdline(p, prof.variants(p)[0], "/dev/dri/renderD128")
+                    self.assertIn("-map 0:a:0?", cmd)
+                    if "-ac3-" in p["name"] or p["name"].endswith("-rec"):
+                        self.assertIn("-c:a copy", cmd)
 
     def test_svt_av1_banner_silenced(self):
         self.assertTrue(self.cmd("analog-av1-opus-webm").startswith("env SVT_LOG=1 ffmpeg "))

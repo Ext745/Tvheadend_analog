@@ -61,7 +61,7 @@ services:
       # - /dev/dvb:/dev/dvb
 
       # --- GPU for VAAPI stream profiles (optional; see README 6b) ---------------------
-      # Lets examples/tvh-analog-profiles create GPU-encoded profiles (the HD 4600 in
+      # Lets examples/tvh-stream-profiles create GPU-encoded profiles (the HD 4600 in
       # this box encodes H.264 via the image's i965 driver). Nothing else uses it.
       # - /dev/dri:/dev/dri
     group_add:

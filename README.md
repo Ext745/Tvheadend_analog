@@ -330,7 +330,7 @@ zero auto-network churn — good for a small, fixed lineup.
 
 ---
 
-## 6b. Stream profiles for analog clients
+## 6b. Stream profiles (analog and digital)
 
 Analog channels reach TVHeadend as 720×480 MPEG-2 with MP2 audio. The video is
 interlaced from a hardware encoder (HVR-1950), already deinterlaced from the raw
@@ -338,14 +338,16 @@ path (800e), and 4:3 either way. Kodi and VLC play that as-is. Browsers and many
 phones, smart TVs and IPTV apps don't. TVHeadend's stock `webtv-*` profiles are a
 poor fit: they scale to 384 lines and don't deinterlace.
 
-`examples/tvh-analog-profiles` creates stream profiles for analog channels (or
-updates them if they already exist). Run it where TVHeadend's ffmpeg runs, so its
-speed test measures the machine that will do the encoding:
+`examples/tvh-stream-profiles` creates stream profiles for analog channels, and for
+digital ATSC channels on the same TVHeadend (see *Digital channels* below), or
+updates them if they already exist. `--sources analog` or `--sources digital`
+limits it to one kind. Run it where TVHeadend's ffmpeg runs, so its speed test
+measures the machine that will do the encoding:
 
 ```bash
-docker cp examples/tvh-analog-profiles tvheadend:/usr/local/bin/
-docker exec tvheadend tvh-analog-profiles [--user admin --password …] [--dry-run]
-docker exec tvheadend tvh-analog-profiles --remove     # undo
+docker cp examples/tvh-stream-profiles tvheadend:/usr/local/bin/
+docker exec tvheadend tvh-stream-profiles [--user admin --password …] [--dry-run]
+docker exec tvheadend tvh-stream-profiles --remove     # undo
 ```
 
 | Profile | Output | For |
@@ -367,6 +369,105 @@ All profiles deinterlace only frames that are actually interlaced, and keep the
 4:3 shape. Pick a profile per client (the `?profile=` URL parameter, or a user's or
 access entry's streaming profile in TVHeadend).
 
+**Digital channels.** ATSC arrives as 1080i, 1080p, 720p60 or 480i MPEG-2, with
+AC-3 audio (often 5.1) plus second-language and description tracks. The `digital-*`
+profiles keep the **main audio track only** (the first), and come in two audio
+flavours:
+- **`-ac3`** copies the original AC-3 untouched, so 5.1 stays 5.1, for Kodi, TVs
+  and home theatres.
+- **`-aac`** downmixes to stereo AAC for browsers and phones.
+
+1080i is deinterlaced to 1080p29.97; 720p60 and other progressive formats pass
+through untouched. All digital profiles are ⚡-gated, tested on a synthetic 1080i
+clip (about 5× the work of analog SD), so each PC gets what it can handle.
+
+| Profile | Output | For |
+|---|---|---|
+| `digital-h264-ac3-mpegts` ⚡ | H.264 + original AC-3, MPEG-TS | Kodi, TVs, IPTV apps |
+| `digital-h264-aac-mpegts` ⚡ | H.264 + AAC stereo, MPEG-TS | phones, VLC, apps without AC-3 |
+| `digital-h265-ac3-mpegts` ⚡ | H.265 + original AC-3 | Kodi, newer TVs |
+| `digital-av1-opus-webm` ⚡ | AV1 + Opus stereo, WebM | Chrome, Firefox |
+| `digital-mobile` ⚡ | H.264 960×540 ~1.5 Mb/s + AAC | phones, remote viewing |
+| `digital-*-vaapi-*` ⚡🎮 | the same five, encoded on the GPU | the same clients, far less CPU |
+
+On the i7-10700 here (real captures, times real time):
+- 1080i: x264 7.8×, x265 3.7×, SVT-AV1 3.6×
+- 720p60: x264 7.7×, x265 1.9×
+- h264_vaapi on the UHD 630: 13.6× (1080i) and 15.3× (720p60)
+
+A typical 4-core PC can manage H.264 in software. H.265 and AV1 at 1080 mostly
+need the GPU.
+
+**Closed captions:** the software profiles carry the station's ATSC (A/53)
+captions through. The GPU profiles drop them. ffmpeg's `h264_vaapi` and
+`hevc_vaapi` fail on captioned streams when asked to copy them (`Encode failed:
+-28`), so the script turns that off for them.
+
+### Choosing a profile
+
+Measured on this project's test PC (i7-10700 with UHD 630 graphics) with real
+content. Analog: an 8 s 480i 4:3 clip with light analog-style noise at 7.8 Mb/s,
+the HVR-1950's default encoder bitrate plus MP2. Digital: 8 s of WNBC 1080i at
+7.4 Mb/s, video plus the main AC-3 5.1 track. How the columns were measured:
+- **Size** is the output against that source, audio included. This is what you
+  save on bandwidth or disk.
+- **Quality** is SSIM against the deinterlaced source: ≥0.97 excellent, 0.96
+  very good, 0.95 good, below that fair. For scale, re-encoding the same content
+  to MPEG-2 at 7 Mb/s scores 0.975 (analog) and 0.958 (digital).
+- **CPU** is CPU cores kept busy while streaming one channel.
+- **Speed** is how much faster than real time this PC encodes it. The script's
+  gate needs 2×.
+
+Weaker PCs scale roughly with core count and age.
+
+| Profile | Best for | Size | Bitrate | Quality | CPU | Speed |
+|---|---|---|---|---|---|---|
+| *(pass / htsp)* | Kodi, VLC | 100% | as received | original | ~0 | — |
+| **Analog** | | | | | | |
+| `analog-h264-aac-mpegts` | IPTV apps, VLC, TVs | 24% | 1.9 Mb/s | good (0.960) | 0.30 | 16× |
+| `analog-h264-aac-matroska` | web player | ≈24% | ≈1.9 Mb/s | ≈good | ≈0.3 | — |
+| `analog-mobile` | phones, remote | 13% | 1.0 Mb/s | 540×360 | 0.22 | 19× |
+| `analog-h265-aac-mpegts` ⚡ | Kodi, newer TVs | 19% | 1.5 Mb/s | good (0.958) | 1.17 | 4.5× |
+| `analog-av1-opus-webm` ⚡ | Chrome, Firefox | 16% | 1.3 Mb/s | fair (0.949) | 1.29 | 6.7× |
+| `analog-h264-720p60` ⚡ | big screens | 47% | 3.7 Mb/s | 960×720, 59.94p | 1.22 | 6.0× |
+| `analog-h264-vaapi-mpegts` 🎮 | as H.264, low CPU | 33% | 2.6 Mb/s | good (0.958) | 0.05 | 18× |
+| `analog-h265-vaapi-mpegts` 🎮 | as H.265, low CPU | 25% | 2.0 Mb/s | good (0.951) | 0.05 | 12× |
+| `analog-mobile-vaapi` 🎮 | phones, low CPU | 14% | 1.1 Mb/s | 540×360 | 0.04 | 19× |
+| `analog-h264-vaapi-720p60` 🎮 | big screens, low CPU | 70% | 5.5 Mb/s | 960×720, 59.94p | 0.06 | 9× |
+| DVR **Analog H.264** | recordings | 34% | 2.6 Mb/s | very good (0.967) | 0.50 | 12× |
+| DVR **Analog H.264 (GPU)** 🎮 | recordings, low CPU | 33% | 2.6 Mb/s | good (0.958) | 0.05 | 18× |
+| **Digital** | | | | | | |
+| `digital-h264-ac3-mpegts` ⚡ | Kodi, TVs (5.1 kept) | 67% | 5.0 Mb/s | very good (0.967) | 2.1 | 5.4× |
+| `digital-h264-aac-mpegts` ⚡ | phones, VLC, apps | 64% | 4.8 Mb/s | very good (0.967) | 2.1 | 4.9× |
+| `digital-h265-ac3-mpegts` ⚡ | Kodi, newer TVs | 43% | 3.2 Mb/s | very good (0.962) | **6.1** | 1.8× |
+| `digital-av1-opus-webm` ⚡ | Chrome, Firefox | 44% | 3.3 Mb/s | excellent (0.976) | **4.9** | 2.2× |
+| `digital-mobile` ⚡ | phones, remote | 19% | 1.4 Mb/s | 960×540 | 0.95 | 7.9× |
+| `digital-h264-vaapi-ac3-mpegts` 🎮 | Kodi, TVs, low CPU | 69% | 5.2 Mb/s | very good (0.964) | 0.03 | 11× |
+| `digital-h264-vaapi-aac-mpegts` 🎮 | phones, low CPU | 66% | 4.9 Mb/s | very good (0.964) | 0.06 | 9× |
+| `digital-h265-vaapi-ac3-mpegts` 🎮 | Kodi, TVs, low CPU | 60% | 4.5 Mb/s | good (0.960) | 0.07 | 4.5× |
+| `digital-mobile-vaapi` 🎮 | phones, low CPU | 21% | 1.6 Mb/s | 960×540 | 0.05 | 12× |
+| DVR **Digital H.264** ⚡ | recordings (5.1 kept) | 78% | 5.8 Mb/s | excellent (0.971) | 3.2 | 3.8× |
+| DVR **Digital H.264 (GPU)** 🎮 | recordings, low CPU | 80% | 6.0 Mb/s | very good (0.966) | 0.03 | 11× |
+
+Rules of thumb:
+- **Smallest file or stream at good quality:** AV1, then H.265, then H.264. That
+  costs CPU unless the GPU does it.
+- **A GPU makes almost everything free.** VAAPI profiles use 0.03–0.07 cores
+  instead of 1–6, at a few percent more size for the same quality.
+- **Analog shrinks a lot** (3–7× smaller), because the HVR-1950's MPEG-2 is
+  generous for SD.
+- **Digital shrinks less** (20–55%), because broadcasters already squeeze their
+  MPEG-2. The bigger win there is compatibility: H.264/AAC plays everywhere.
+- **Software H.265 and AV1 at 1080** are heavy: 5–6 cores each here, and H.265
+  measured just under the 2× gate on real content. On most PCs, use the GPU
+  versions for those.
+
+Settings were picked from a size-vs-SSIM sweep: each profile beats or matches an
+MPEG-2 re-encode of the same content while saving space. One measuring trap:
+MPEG-TS output decodes one frame later than its source, so SSIM must be
+compared at the best frame alignment, or every TS profile looks about 0.02
+worse than it is.
+
 **Recording analog as H.264.** The script also creates two DVR profiles
 (**Configuration → Recording**):
 - **Analog H.264** uses the `analog-h264-rec` stream profile: x264 at the slower
@@ -375,7 +476,12 @@ access entry's streaming profile in TVHeadend).
 - **Analog H.264 (GPU)** uses `analog-h264-vaapi-rec`. It is only created if the
   GPU test passes.
 
-On a real 480i clip, H.264 came out at about 28% of the MPEG-2 size (0.85 vs
+**Digital H.264** and **Digital H.264 (GPU)** do the same for ATSC, keeping the
+original AC-3. The saving depends on the station: WNET, which shares its mux with
+five subchannels, already runs lean MPEG-2 (about 5.8 Mb/s), and H.264 saved only
+15–30%. Stations that give their main channel 12–15 Mb/s save much more.
+
+On a real 480i clip, analog H.264 came out at about 28% of the MPEG-2 size (0.85 vs
 3.0 Mb/s, or about 0.4 GB/h instead of 1.4 GB/h). The HVR-1950's own MPEG-2
 usually runs at a higher bitrate, so the saving there is larger. New DVR profiles
 copy the storage path and file-name pattern from the default DVR profile; later
@@ -794,7 +900,7 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
 - **Hybrid-card guard (`DVB_GUARD`).** On a card whose analog and digital sides
   share one tuner, `tune`, `signal`, `stream` and every channel of `scan` refuse
   to start while the DVB side is busy, instead of wedging the card (see §11).
-- **Stream profiles for analog clients** (`examples/tvh-analog-profiles`, §6b):
+- **Stream profiles for analog and digital clients** (`examples/tvh-stream-profiles`, §6b):
   H.264/AAC for IPTV apps, browsers and phones, plus H.265, AV1, an upscaled
   59.94p H.264, VAAPI (GPU) versions at about a tenth of the CPU, and H.264 DVR
   profiles for recording analog at about a third of the size. The heavier
