@@ -203,7 +203,7 @@ class CmdStream(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
 
-    def fake_supervise(self, cfg, cmd, lock, via_cat):
+    def fake_supervise(self, cfg, cmd, lock, via_cat, watch=None):
         self.supervised.append({"cmd": cmd, "via_cat": via_cat,
                                 "lock_held": self.lock_is_held(lock.path),
                                 "tuned_first": any(o.startswith("--set-") for o in self.fake.opts())})

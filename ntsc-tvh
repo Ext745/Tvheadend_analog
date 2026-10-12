@@ -706,7 +706,10 @@ def _stop(procs, grace):
             p.wait()
 
 
-def supervise(cfg, cmd, lock, via_cat):
+WATCH_EVERY = 0.5                 # seconds between supervise()'s `watch` checks
+
+
+def supervise(cfg, cmd, lock, via_cat, watch=None):
     """Run ffmpeg (fed by `cat DEV` when via_cat) as children and return an exit code.
 
     ntsc-tvh stays the process TVHeadend started, so TVHeadend's stop signal lands here.
@@ -714,7 +717,8 @@ def supervise(cfg, cmd, lock, via_cat):
     ffmpeg itself can't be trusted to exit (e.g. ffmpeg 6.1 with an em28xx ALSA input
     blocks forever on audio once video stops). ffmpeg inherits our stdout, so the stream
     goes straight to TVHeadend, and it also inherits the tuner lock, so the lock is only
-    released once every process using the tuner is gone."""
+    released once every process using the tuner is gone. `watch`, if given, is called
+    every WATCH_EVERY seconds; a message back stops the stream with exit code 1."""
     stop = []
 
     def on_signal(signum, frame):
@@ -735,12 +739,21 @@ def supervise(cfg, cmd, lock, via_cat):
         procs.insert(0, ff)
         if via_cat:
             cat.stdout.close()                   # ffmpeg holds the read end now
+        next_watch = time.monotonic() + WATCH_EVERY
         while not stop:
             try:
                 rc = ff.wait(timeout=0.25)
                 break
             except subprocess.TimeoutExpired:
                 pass
+            if watch and time.monotonic() >= next_watch:
+                next_watch = time.monotonic() + WATCH_EVERY
+                msg = watch()
+                if msg:
+                    sys.stderr.write(f"ntsc-tvh: {msg}\n")
+                    sys.stderr.flush()
+                    rc = 1
+                    break
         else:
             rc = 128 + stop[0]
     finally:
@@ -768,8 +781,23 @@ def cmd_stream(cfg, args):
                              f"({'tuner '+format(chan['freq'],'.3f')+' MHz' if chan['freq'] else chan['input']}) "
                              f"via {'HW-MPEG' if info['hw_encoder'] else 'raw-encode'}\n")
             sys.stderr.flush()
-        rc = supervise(cfg, cmd, lock, via_cat)
+        rc = supervise(cfg, cmd, lock, via_cat, watch=lambda: dvb_opened(cfg))
     sys.exit(rc)
+
+
+def dvb_opened(cfg):
+    """supervise() watch: why to stop now that the DVB side of this tuner is in use, or None.
+
+    check_dvb_idle() only runs before a stream starts. TVHeadend doesn't know about
+    ntsc-tvh, so it can still open the DVB side mid-stream (a recording, a client, an EPG
+    grab). Stopping the analog stream at once is the most this side can do; it can't
+    stop TVHeadend's first tune, so on an em28xx this narrows the window rather than
+    closing it."""
+    try:
+        check_dvb_idle(cfg)
+    except ChannelError as exc:
+        return f"stopped the analog stream: {exc}"
+    return None
 
 
 # --------------------------------------------------------------------------- #

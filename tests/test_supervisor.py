@@ -5,6 +5,7 @@ SIGTERM like ffmpeg 6.1 does on an em28xx ALSA input, a fake v4l2-ctl that answe
 fixtures, and the real `cat` reading /dev/zero (which, like a capture node, never ends).
 """
 
+import io
 import json
 import os
 import signal
@@ -13,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from helpers import REPO, SCRIPT, ntsc
 
@@ -191,6 +193,26 @@ class Supervisor(unittest.TestCase):
         self.assertLess(elapsed, 2)
         self.assert_all_gone()
 
+
+    def test_watch_message_stops_the_stream(self):
+        # In-process: TVHeadend opening the DVB side mid-stream ends the analog stream.
+        os.makedirs(os.path.dirname(self.lock))
+        cfg = dict(ntsc.DEFAULTS, STOP_GRACE="0.5")
+        calls = []
+
+        def watch():
+            calls.append(time.monotonic())
+            return "stopped the analog stream: DVB opened" if len(calls) == 2 else None
+
+        err = io.StringIO()
+        t0 = time.monotonic()
+        with ntsc.TunerLock(self.lock, wait=0) as lock, mock.patch("sys.stderr", err):
+            rc = ntsc.supervise(cfg, ["sleep", "30"], lock, via_cat=False, watch=watch)
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(calls), 2)
+        self.assertLess(time.monotonic() - t0, 2 * ntsc.WATCH_EVERY + 1.5)
+        self.assertIn("ntsc-tvh: stopped the analog stream: DVB opened", err.getvalue())
+        self.assertFalse(self.lock_is_held())
 
 if __name__ == "__main__":
     unittest.main()

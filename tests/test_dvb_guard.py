@@ -117,6 +117,13 @@ class DvbGuard(unittest.TestCase):
         self.process(201, "tvheadend", "dvr")               # /dev/full: adapter0's dvr
         self.assertEqual(ntsc.dvb_users(cfg), {"dvr": [(201, "tvheadend")]})
 
+    def test_mid_stream_watch(self):
+        self.assertIsNone(ntsc.dvb_opened(self.cfg))
+        self.process(200, "tvheadend", "frontend")
+        self.assertRegex(ntsc.dvb_opened(self.cfg),
+                         r"^stopped the analog stream: .*tvheadend \(pid 200\) has the DVB frontend open")
+        self.assertIsNone(ntsc.dvb_opened(dict(self.cfg, DVB_GUARD="0")))
+
     def test_dvb_on_another_device_is_ignored(self):
         self.adapter(1, f"{USB}/1-2/1-2:1.0", nodes={"frontend": "/dev/null"})
         # only adapter1 (another stick) is "open": same stand-in device, so drop adapter0's

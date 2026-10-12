@@ -949,10 +949,13 @@ save** for the ATSC adapter (it closes the frontend when idle). The check runs b
 live ATSC stream in testing. `doctor` reports the DVB state too, and skips its
 device probe while the DVB side is open.
 
-The guard only covers one direction. If TVHeadend starts a DVB subscription (a
-recording, a client, an EPG grab) while an analog stream is already running,
-nothing stops it, because TVHeadend doesn't know about ntsc-tvh. On a shared
-stick, avoid scheduling ATSC while analog is in use. To share the stick with TVHeadend's ATSC side, set the
+The other direction is only partly covered. TVHeadend doesn't know about
+ntsc-tvh, so it can start a DVB subscription (a recording, a client, an EPG grab)
+while an analog stream is running. `stream` checks every half second and stops the
+analog stream as soon as the DVB side opens (`stopped the analog stream: ...` in
+TVHeadend's log), but TVHeadend's first tune has already happened by then, so this
+narrows the window rather than closing it. On a shared stick, avoid scheduling ATSC
+while analog is in use, or leave ATSC to another tuner. To share the stick with TVHeadend's ATSC side, set the
 adapter's **Power save** on (TVHeadend then closes the tuner when idle) and turn
 off **Over-the-air EPG**, **Idle scan** and **Initial scan** for it
 (**Configuration → DVB Inputs → TV adapters**), or disable the global over-the-air
