@@ -341,13 +341,14 @@ It does what Method A below does by hand, through TVHeadend's web API:
 Re-running it is safe: it only does what is missing, so run it again after a rescan
 adds channels. `--teardown` removes the network with its muxes and services, the
 channels that came only from it, and its channel tag; nothing else. If TVHeadend asks
-for a login, add `--user admin --password …`; `--url` points it at another address
-(default `http://localhost:9981`).
+for a login, add `--user admin --password …` (any of its login modes works: digest
+MD5, SHA-256 or SHA-512-256, or plain); `--url` points it at another address (default
+`http://localhost:9981`).
 
 It is a convenience layer only: if a future TVHeadend changes its API, `tvh-setup`
 stops with a message naming the field it couldn't find and the TVHeadend version, and
 streaming, scanning and the playlist keep working. Set things up by hand then, below.
-Tested against TVHeadend 4.3-2891.
+Tested against TVHeadend 4.3-2891, including a brand-new install with an admin login.
 
 ### Method A — Automatic IPTV Network (by hand)
 

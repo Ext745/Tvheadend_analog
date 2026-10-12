@@ -1226,6 +1226,22 @@ class TvhError(Exception):
     pass
 
 
+def _tvh_digest_handler():
+    """urllib's digest login plus the SHA-256 (Python < 3.13 lacks it) and SHA-512-256
+    algorithms TVHeadend offers (Configuration > General > Base > HTTP digest algorithm)."""
+    import hashlib
+    import urllib.request
+
+    class Digest(urllib.request.HTTPDigestAuthHandler):
+        def get_algorithm_impls(self, algorithm):
+            name = {"SHA-256": "sha256", "SHA-512-256": "sha512_256"}.get(algorithm)
+            if name is None:
+                return super().get_algorithm_impls(algorithm)
+            H = lambda x: hashlib.new(name, x.encode("ascii")).hexdigest()
+            return H, lambda s, d: H(f"{s}:{d}")
+    return Digest
+
+
 class TvhApi:
     """TVHeadend's web API: every call is a form POST to /api/PATH returning JSON.
 
@@ -1241,8 +1257,8 @@ class TvhApi:
         if user:
             mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
             mgr.add_password(None, self.url + "/", user, password or "")
-            handlers += [urllib.request.HTTPDigestAuthHandler(mgr),
-                         urllib.request.HTTPBasicAuthHandler(mgr)]
+            handlers += [_tvh_digest_handler()(mgr), urllib.request.HTTPBasicAuthHandler(mgr)]
+        self.user = user
         self.opener = urllib.request.build_opener(*handlers)
 
     @staticmethod
@@ -1262,6 +1278,9 @@ class TvhApi:
                 body = r.read()
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
+                if self.user:
+                    raise TvhError(f"TVHeadend refused /api/{path} (HTTP {exc.code}): wrong "
+                                   f"--user/--password, or that user isn't an admin")
                 raise TvhError(f"TVHeadend refused /api/{path} (HTTP {exc.code}): give an "
                                f"admin login with --user and --password")
             raise TvhError(f"/api/{path}: HTTP {exc.code} from TVHeadend {self.version}")

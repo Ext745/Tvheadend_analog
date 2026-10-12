@@ -249,6 +249,20 @@ class TvhSetupTest(unittest.TestCase):
         self.assertEqual(self.tvh.tags, {})
 
 
+class DigestTest(unittest.TestCase):
+    """TVHeadend offers MD5, SHA-256 and SHA-512-256 digest logins; Python 3.12 (in the
+    linuxserver image) only knows MD5 and SHA-1, so tvh-setup adds the other two."""
+
+    def test_algorithms(self):
+        import hashlib
+        h = ntsc._tvh_digest_handler()()
+        for algo, name in (("MD5", "md5"), ("SHA-256", "sha256"),
+                           ("SHA-512-256", "sha512_256")):
+            H, KD = h.get_algorithm_impls(algo)
+            self.assertEqual(H("a:b"), hashlib.new(name, b"a:b").hexdigest())
+            self.assertEqual(KD("s", "d"), hashlib.new(name, b"s:d").hexdigest())
+
+
 class IsolationTest(unittest.TestCase):
     def test_core_does_not_import_urllib(self):
         code = ("import importlib.machinery,importlib.util,sys;"
