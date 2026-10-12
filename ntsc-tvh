@@ -514,9 +514,34 @@ def _hw_device(sysdev):
     return os.path.dirname(sysdev) if USB_INTERFACE.match(os.path.basename(sysdev)) else sysdev
 
 
+def _video_node(device):
+    """The sysfs video4linux name of a device node. Matched by device number, because in
+    a container /dev/video1 may be the host's video0 while /sys still shows host names;
+    falls back to the node's own name when there's no number to match."""
+    try:
+        st = os.stat(device)
+    except OSError:
+        st = None
+    if st is not None and stat.S_ISCHR(st.st_mode):
+        v4l = os.path.join(SYS_ROOT, "class", "video4linux")
+        try:
+            names = sorted(os.listdir(v4l))
+        except OSError:
+            names = []
+        for name in names:
+            try:
+                with open(os.path.join(v4l, name, "dev")) as fh:
+                    major, minor = (int(x) for x in fh.read().split(":"))
+            except (OSError, ValueError):
+                continue
+            if os.makedev(major, minor) == st.st_rdev:
+                return name
+    return os.path.basename(os.path.realpath(device))
+
+
 def _video_hw_device(cfg):
     """The physical device (sysfs path) behind cfg DEVICE, or None if sysfs doesn't say."""
-    node = os.path.basename(os.path.realpath(cfg["DEVICE"]))
+    node = _video_node(cfg["DEVICE"])
     vdev = os.path.join(SYS_ROOT, "class", "video4linux", node, "device")
     if not os.path.exists(vdev):
         return None

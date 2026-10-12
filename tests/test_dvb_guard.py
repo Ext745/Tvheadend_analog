@@ -102,6 +102,21 @@ class DvbGuard(unittest.TestCase):
         with self.assertRaisesRegex(ntsc.ChannelError, "Power save"):
             ntsc.check_dvb_idle(self.cfg)
 
+    def test_device_matched_by_number_not_name(self):
+        # In a container /dev/video1 can be the host's video0 while /sys shows host names
+        # (seen after a reboot swapped the HVR-1950 and the 800e).
+        self.video("video1", f"{USB}/1-2/1-2:1.0")        # another card, holding the name
+        self.adapter(1, f"{USB}/1-2/1-2:1.0", nodes={"frontend": "/dev/zero"})
+        with open(os.path.join(self.sys, "class/video4linux/video0/dev"), "w") as fh:
+            fh.write(devno("/dev/full") + "\n")
+        os.remove(os.path.join(self.sys, "class/dvb/dvb0.frontend0"))
+        self.process(200, "tvheadend", "frontend")         # /dev/null: nobody's frontend now
+        cfg = dict(self.cfg, DEVICE="/dev/full")            # "video1" by name, video0 by number
+        self.assertEqual(ntsc._video_node("/dev/full"), "video0")
+        self.assertEqual(ntsc.dvb_users(cfg), {})
+        self.process(201, "tvheadend", "dvr")               # /dev/full: adapter0's dvr
+        self.assertEqual(ntsc.dvb_users(cfg), {"dvr": [(201, "tvheadend")]})
+
     def test_dvb_on_another_device_is_ignored(self):
         self.adapter(1, f"{USB}/1-2/1-2:1.0", nodes={"frontend": "/dev/null"})
         # only adapter1 (another stick) is "open": same stand-in device, so drop adapter0's
