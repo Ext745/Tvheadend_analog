@@ -875,6 +875,8 @@ ntsc-tvh --card 800e scan          # or: ntsc-tvh --card 800e m3u  (line inputs 
   and map them to channels. Or let `ntsc-tvh --card NAME tvh-setup` do all of that.
 - In Docker, mount the folder: `- /home/docker/stacks/tvheadend/ntsc-tvh.d:/etc/ntsc-tvh.d:ro`,
   and map both video devices (by `/dev/v4l/by-id/...` so a replug doesn't swap them).
+  A `by-id` path can be missing when Docker starts at boot; see §11, "Container
+  doesn't start after a reboot".
 
 Tested with an HVR-1950 (no name) and an 800e (`--card 800e`) in one container: both
 streamed through TVHeadend at the same time, each under its own lock.
@@ -1019,6 +1021,37 @@ setting on the mux:
 The next stream waits up to `SCAN_LOCK_WAIT` (5 s) for the lock, which covers
 either case. If you still see this, check for a stray ffmpeg holding the device
 (`docker exec tvheadend pgrep -a ffmpeg`).
+
+**Container doesn't start after a reboot (`Exited (255)`).** `docker ps -a` shows
+the TVHeadend container exited, and `docker inspect -f '{{.State.Error}}' tvheadend`
+says `error gathering device information while adding custom device
+"/dev/v4l/by-id/...": no such file or directory`. Docker started the container
+before udev had created that `by-id` link (a tuner behind a USB hub can take a few
+seconds longer), and Docker doesn't retry. `docker start tvheadend` fixes it until
+the next boot. To make it stick, add a unit that waits for the tuner, e.g.
+`/etc/systemd/system/tvheadend-start.service`:
+
+```ini
+[Unit]
+Description=Start TVHeadend once its USB tuner is present
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sh -c 'for i in $$(seq 90); do [ -e /dev/v4l/by-id/usb-YOUR-TUNER-video-index0 ] && exit 0; sleep 2; done'
+ExecStart=/usr/bin/docker start tvheadend
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Put your own `by-id` name in (`ls /dev/v4l/by-id/`), and add another `[ -e ... ]
+&&` test for each mapped tuner. Then run `sudo systemctl enable tvheadend-start`.
+`docker start` on a running container does nothing, so this is harmless when
+Docker's own start worked. Docker reads the `by-id` link each time it starts the
+container, so the cards stay correctly assigned even when the host numbers them the
+other way round after a reboot.
 
 ---
 
