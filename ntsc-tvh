@@ -15,6 +15,7 @@
 #   m3u                    Write an M3U playlist of active channels (for TVHeadend auto-network)
 #   install-timer          Install/remove a systemd timer for periodic rescan (24h or none)
 #   status                 Show last-scan summary
+#   tvh-setup              Set the network + channels up in TVHeadend (its web API)
 #
 # Channel IDs:   TABLE:CHANNEL          e.g.  us-bcast:7   us-cable:23   us-cable-irc:5
 #                input:NAME             e.g.  input:composite   input:svideo
@@ -1202,6 +1203,355 @@ WantedBy=timers.target
 
 
 # --------------------------------------------------------------------------- #
+#  tvh-setup: set the analog network up in TVHeadend through its JSON API
+#
+#  An optional convenience layer. Nothing else in this script calls into this
+#  section, and it imports urllib only when it runs, so if a TVHeadend build
+#  changes its API only `tvh-setup` fails -- stream/scan/m3u keep working.
+#  Written against TVHeadend 4.3-2891~ga87be591f (API version 20).
+# --------------------------------------------------------------------------- #
+TVH_URL = "http://localhost:9981"
+TVH_TESTED = "4.3-2891~ga87be591f"
+# the iptv_auto_network fields tvh-setup sets (or reads), by the name TVHeadend gives them
+NET_FIELDS = ("enabled", "networkname", "url", "max_streams", "scan_create", "skipinitscan")
+EPG_OFF = 0                        # mux "epg": 0 = Disable (1 = Enable (auto), 101 = Auto-Detected)
+SCAN_STATES = {0: "idle", 1: "pending", 2: "pending (idle scan)", 3: "scanning"}
+SCAN_RESULTS = {0: "not scanned", 1: "OK", 2: "FAILED", 3: "OK (partial)", 4: "ignored"}
+
+
+class TvhError(Exception):
+    pass
+
+
+class TvhApi:
+    """TVHeadend's web API: every call is a form POST to /api/PATH returning JSON.
+
+    Reads are always sent. Writes are printed and skipped with dry_run, so a dry run
+    shows every call that would change something (method, URL, body)."""
+
+    def __init__(self, url, user=None, password=None, dry_run=False):
+        import urllib.request
+        self.url = url.rstrip("/")
+        self.dry_run = dry_run
+        self.version = "?"
+        handlers = []
+        if user:
+            mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+            mgr.add_password(None, self.url + "/", user, password or "")
+            handlers += [urllib.request.HTTPDigestAuthHandler(mgr),
+                         urllib.request.HTTPBasicAuthHandler(mgr)]
+        self.opener = urllib.request.build_opener(*handlers)
+
+    @staticmethod
+    def _body(form):
+        import urllib.parse
+        return urllib.parse.urlencode(
+            {k: json.dumps(v) if isinstance(v, (dict, list, bool)) else v
+             for k, v in form.items()})
+
+    def call(self, path, **form):
+        import urllib.error
+        if self.dry_run:
+            print(f"  read       {self.url}/api/{path}")
+        try:
+            with self.opener.open(f"{self.url}/api/{path}",
+                                  data=self._body(form).encode(), timeout=30) as r:
+                body = r.read()
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise TvhError(f"TVHeadend refused /api/{path} (HTTP {exc.code}): give an "
+                               f"admin login with --user and --password")
+            raise TvhError(f"/api/{path}: HTTP {exc.code} from TVHeadend {self.version}")
+        except (urllib.error.URLError, OSError) as exc:
+            reason = getattr(exc, "reason", exc)
+            raise TvhError(f"can't reach TVHeadend at {self.url} ({reason}); "
+                           f"is it running? (--url sets the address)")
+        except ValueError as exc:      # e.g. a digest algorithm urllib doesn't know
+            raise TvhError(f"/api/{path}: {exc}")
+        try:
+            return json.loads(body) if body.strip() else {}
+        except ValueError:
+            raise TvhError(f"/api/{path}: TVHeadend {self.version} answered something "
+                           f"that isn't JSON")
+
+    def write(self, path, **form):
+        if self.dry_run:
+            print(f"  would POST {self.url}/api/{path}  " + "  ".join(
+                f"{k}={json.dumps(v) if isinstance(v, (dict, list, bool)) else v}"
+                for k, v in form.items()))
+            return {}
+        return self.call(path, **form)
+
+    def grid(self, path):
+        return self.call(path, start=0, limit=100000).get("entries", [])
+
+
+def _need(entries, field, what, version):
+    """Each of `entries` (dicts) must have `field`; else stop and say which one is missing."""
+    for e in entries:
+        if field not in e:
+            raise TvhError(f"TVHeadend {version}: {what} has no field '{field}' (tvh-setup "
+                           f"was written against {TVH_TESTED}). Set the network up by hand "
+                           f"instead: README section 6, Method A.")
+
+
+def tvh_m3u_names(cfg):
+    """Channel names in this card's playlist, or None if it can't be read from here."""
+    try:
+        with open(cfg["M3U_FILE"]) as fh:
+            return [ln.rsplit(",", 1)[-1].strip() for ln in fh if ln.startswith("#EXTINF")]
+    except OSError:
+        return None
+
+
+def tvh_default_name(cfg):
+    return f"Analog {cfg['CARD']} (ntsc-tvh)" if cfg.get("CARD") else "Analog (ntsc-tvh)"
+
+
+def tvh_read(api, cfg, args):
+    """Everything tvh-setup looks at, read from TVHeadend. Checks the fields it relies on."""
+    info = api.call("serverinfo")
+    api.version = info.get("sw_version", "?")
+    v = api.version
+    builders = api.call("mpegts/network/builders").get("entries", [])
+    cls = next((b for b in builders if b.get("class") == "iptv_auto_network"), None)
+    if cls is None:
+        raise TvhError(f"TVHeadend {v} offers no 'iptv_auto_network' (Automatic IPTV "
+                       f"Network) class; is it built without IPTV support?")
+    props = {p.get("id") for p in cls.get("props", [])}
+    for f in NET_FIELDS:
+        if f not in props:
+            raise TvhError(f"TVHeadend {v}: the Automatic IPTV Network has no field '{f}' "
+                           f"(tvh-setup was written against {TVH_TESTED}). Set the network "
+                           f"up by hand instead: README section 6, Method A.")
+    name = args.network_name or tvh_default_name(cfg)
+    url = args.m3u_url or "file://" + cfg["M3U_FILE"]
+    nets = api.grid("mpegts/network/grid")
+    _need(nets, "networkname", "the network list", v)
+    named = [n for n in nets if n["networkname"] == name]
+    if len(named) > 1:
+        raise TvhError(f"TVHeadend has {len(named)} networks named '{name}'; delete or "
+                       f"rename the extra ones (Configuration > DVB Inputs > Networks), "
+                       f"then run this again")
+    same_url = [n for n in nets if n.get("url") == url and n not in named]
+    net, how = None, None
+    if named:
+        net, how = named[0], "name"
+    elif len(same_url) == 1 and not args.network_name:
+        net, how = same_url[0], "url"   # made by hand under another name: adopt, don't duplicate
+    elif len(same_url) > 1:
+        raise TvhError(f"{len(same_url)} networks already read {url}: "
+                       f"{', '.join(n['networkname'] for n in same_url)}. Keep one "
+                       f"(delete the others), or pick one with --network-name")
+    if net is not None:
+        node = api.call("idnode/load", uuid=net["uuid"]).get("entries", [{}])[0]
+        if node.get("class") != "iptv_auto_network":
+            raise TvhError(f"network '{net['networkname']}' is a {node.get('class')}, not an "
+                           f"Automatic IPTV Network; give tvh-setup another name with "
+                           f"--network-name (it won't change a network it can't manage)")
+    muxes = services = channels = []
+    if net is not None:
+        muxes = [m for m in api.grid("mpegts/mux/grid") if m.get("network_uuid") == net["uuid"]]
+        _need(muxes, "epg", "a mux", v)
+        _need(muxes, "scan_result", "a mux", v)
+        ids = {m["uuid"] for m in muxes}
+        services = [s for s in api.grid("mpegts/service/grid")
+                    if s.get("multiplex_uuid") in ids]
+        _need(services, "channel", "a service", v)
+        sids = {s["uuid"] for s in services}
+        channels = [c for c in api.grid("channel/grid") if set(c.get("services", [])) & sids]
+    return {"version": v, "name": name, "url": url, "net": net, "how": how,
+            "muxes": muxes, "services": services, "channels": channels,
+            "playlist": tvh_m3u_names(cfg)}
+
+
+def tvh_print_status(api, cfg, st):
+    print(f"TVHeadend {st['version']} at {api.url}")
+    pl = st["playlist"]
+    where = st["url"]
+    if pl is None:
+        print(f"playlist:   {where} (not readable from here; TVHeadend reads it itself)")
+    else:
+        print(f"playlist:   {where}: {len(pl)} channel(s)")
+    net = st["net"]
+    if net is None:
+        print(f"network:    none yet -- `ntsc-tvh{' --card ' + cfg['CARD'] if cfg.get('CARD') else ''}"
+              f" tvh-setup` creates '{st['name']}'")
+        return
+    adopted = f" (found by its playlist URL)" if st["how"] == "url" else ""
+    print(f"network:    '{net['networkname']}'{adopted}, "
+          f"{'enabled' if net.get('enabled') else 'DISABLED'}")
+    if net.get("url") != st["url"]:
+        print(f"            reads {net.get('url')!r}, not this card's playlist")
+    ms = net.get("max_streams")
+    print(f"streams:    {ms or 'unlimited'} at a time"
+          + ("" if ms == 1 else "  <- should be 1: one tuner plays one channel at a time"))
+    muxes = st["muxes"]
+    epg_on = [m for m in muxes if m.get("epg") != EPG_OFF]
+    print(f"OTA EPG:    " + ("off on every mux" if not epg_on else
+                             f"ON for {len(epg_on)} of {len(muxes)} mux(es)  <- the EPG grabber "
+                             f"would tie up the tuner for nothing; tvh-setup turns it off"))
+    by = {}
+    for m in muxes:
+        st_ = SCAN_STATES.get(m.get("scan_state"), "?")
+        res = SCAN_RESULTS.get(m.get("scan_result"), "?")
+        by.setdefault(res if st_ == "idle" else st_, []).append(m)
+    print(f"muxes:      {len(muxes)}" + (": " + ", ".join(f"{len(v)} {k}" for k, v in by.items())
+                                         if muxes else ""))
+    for m in by.get("FAILED", []):
+        print(f"            scan failed: {m.get('iptv_sname') or m.get('name')}"
+              f"  (tuner busy, or the channel didn't stream: try `ntsc-tvh doctor`)")
+    unmapped = [s for s in st["services"] if not s.get("channel")]
+    names = sorted(c["name"] for c in st["channels"])
+    print(f"channels:   {len(names)}" + (": " + ", ".join(names) if names else ""))
+    if unmapped:
+        print(f"            {len(unmapped)} service(s) not mapped to a channel yet")
+    if pl is not None:
+        have = {m.get("iptv_sname") for m in muxes}
+        missing = [n for n in pl if n not in have]
+        if missing:
+            print(f"            in the playlist but not in TVHeadend yet: {', '.join(missing)}")
+
+
+def tvh_wait(what, check, timeout, step=2.0):
+    """Poll check() until it returns true; False on timeout."""
+    end = time.monotonic() + timeout
+    while True:
+        if check():
+            return True
+        if time.monotonic() >= end:
+            print(f"  ...gave up waiting for {what} after {timeout:.0f} s")
+            return False
+        time.sleep(step)
+
+
+def tvh_setup(api, cfg, args, st):
+    dry = api.dry_run
+    name, url = st["name"], st["url"]
+    if st["playlist"] == []:
+        print(f"warning: {cfg['M3U_FILE']} lists no channels; run `ntsc-tvh scan` first")
+    elif st["playlist"] is None and not args.m3u_url:
+        print(f"note: can't read {cfg['M3U_FILE']} here; run tvh-setup where TVHeadend runs "
+              f"(e.g. `docker exec tvheadend ntsc-tvh tvh-setup`) or pass --m3u-url")
+
+    # 1. the network: one per card, one stream at a time
+    net = st["net"]
+    want = {"enabled": True, "url": url, "max_streams": 1}
+    if net is None:
+        print(f"1. create network '{name}' reading {url}")
+        conf = dict(want, networkname=name, scan_create=True, skipinitscan=True)
+        r = api.write("mpegts/network/create", **{"class": "iptv_auto_network", "conf": conf})
+        if dry:
+            print("   (the rest depends on what TVHeadend makes of the playlist; "
+                  "run without --dry-run to see it)")
+            return
+        uuid = r.get("uuid")
+        if not uuid:
+            raise TvhError(f"TVHeadend {st['version']} didn't return the new network's uuid")
+        n_pl = len(st["playlist"] or [])
+        print(f"   waiting for TVHeadend to read the playlist...")
+        tvh_wait("the playlist's muxes", lambda: len(_muxes(api, uuid)) >= max(n_pl, 1), 30)
+        st = tvh_read(api, cfg, argparse.Namespace(network_name=name, m3u_url=url))
+        net = st["net"]
+    else:
+        change = {k: v for k, v in want.items() if net.get(k) != v}
+        if change:
+            print(f"1. update network '{net['networkname']}': " + ", ".join(
+                f"{k} {net.get(k)!r} -> {v!r}" for k, v in change.items()))
+            api.write("idnode/save", node=dict(change, uuid=net["uuid"]))
+        else:
+            print(f"1. network '{net['networkname']}' already set (1 stream, this playlist)")
+
+    # 2. OTA EPG off on every mux: analog pipes carry no guide data, and the grabber
+    #    would subscribe to each mux and run the tuner for nothing.
+    epg_on = [m for m in st["muxes"] if m.get("epg") != EPG_OFF]
+    if epg_on:
+        print(f"2. turn off the OTA EPG grabber on {len(epg_on)} mux(es)")
+        for m in epg_on:
+            api.write("idnode/save", node={"uuid": m["uuid"], "epg": EPG_OFF})
+    else:
+        print(f"2. OTA EPG already off on all {len(st['muxes'])} mux(es)")
+
+    # 3. scan the muxes that have no service yet (each scan runs `ntsc-tvh stream` briefly)
+    unscanned = [m for m in st["muxes"] if not m.get("num_svc")]
+    if unscanned:
+        print(f"3. scan {len(unscanned)} mux(es) without a service (each tunes the card "
+              f"for a few seconds)")
+        api.write("mpegts/network/scan", uuid=net["uuid"])
+        if not dry:
+            idle = lambda: all(m.get("scan_state") == 0 for m in _muxes(api, net["uuid"]))
+            time.sleep(2)
+            tvh_wait("the scan", idle, 20 + 15 * len(st["muxes"]))
+            st = tvh_read(api, cfg, argparse.Namespace(network_name=net["networkname"],
+                                                        m3u_url=url))
+    else:
+        print(f"3. every mux already has its service; no scan needed")
+
+    # 4. map services that have no channel yet; channels are named after the playlist
+    unmapped = [s["uuid"] for s in st["services"] if not s.get("channel")]
+    if unmapped:
+        print(f"4. map {len(unmapped)} service(s) to channels")
+        api.write("service/mapper/save", node={
+            "services": unmapped, "check_availability": False, "encrypted": False,
+            "merge_same_name": False, "provider_tags": True, "network_tags": True})
+        if not dry:
+            mapped = lambda: all(s.get("channel") for s in api.grid("mpegts/service/grid")
+                                 if s["uuid"] in unmapped)
+            tvh_wait("the channel mapping", mapped, 30)
+    else:
+        print(f"4. every service already has a channel")
+    if not dry:
+        print()
+        args = argparse.Namespace(network_name=net["networkname"], m3u_url=url)
+        tvh_print_status(api, cfg, tvh_read(api, cfg, args))
+
+
+def _muxes(api, net_uuid):
+    return [m for m in api.grid("mpegts/mux/grid") if m.get("network_uuid") == net_uuid]
+
+
+def tvh_teardown(api, cfg, st):
+    net = st["net"]
+    if net is None:
+        print(f"nothing to remove: no network '{st['name']}'")
+        return
+    # Channels go only if every one of their services is on this network (a channel
+    # that also carries, say, an ATSC service stays). Deleting the network removes
+    # its muxes and services with it.
+    sids = {s["uuid"] for s in st["services"]}
+    gone = [c for c in st["channels"] if set(c.get("services", [])) <= sids]
+    for c in gone:
+        print(f"remove channel '{c['name']}'")
+        api.write("idnode/delete", uuid=c["uuid"])
+    print(f"remove network '{net['networkname']}' with its {len(st['muxes'])} mux(es) "
+          f"and {len(st['services'])} service(s)")
+    api.write("idnode/delete", uuid=net["uuid"])
+    # the channel tag the mapper named after the network, once no channel uses it
+    tags = [t for t in api.grid("channeltag/grid") if t.get("name") == net["networkname"]]
+    if tags:
+        gone_ids = {c["uuid"] for c in gone}
+        users = [c for c in api.grid("channel/grid")
+                 if c["uuid"] not in gone_ids and tags[0]["uuid"] in c.get("tags", [])]
+        if not users:
+            print(f"remove channel tag '{net['networkname']}'")
+            api.write("idnode/delete", uuid=tags[0]["uuid"])
+
+
+def cmd_tvh_setup(cfg, args):
+    api = TvhApi(args.url, args.user, args.password, dry_run=args.dry_run)
+    try:
+        st = tvh_read(api, cfg, args)
+        if args.status:
+            tvh_print_status(api, cfg, st)
+        elif args.teardown:
+            tvh_teardown(api, cfg, st)
+        else:
+            tvh_setup(api, cfg, args, st)
+    except TvhError as exc:
+        sys.exit(f"tvh-setup: {exc}")
+
+
+# --------------------------------------------------------------------------- #
 #  CLI
 # --------------------------------------------------------------------------- #
 def build_parser():
@@ -1260,6 +1610,21 @@ def build_parser():
 
     sp = sub.add_parser("status", help="show last-scan summary")
     sp.set_defaults(func=cmd_status)
+
+    sp = sub.add_parser("tvh-setup", help="set this card's network + channels up in TVHeadend")
+    sp.add_argument("--url", default=TVH_URL, help=f"TVHeadend web address (default {TVH_URL})")
+    sp.add_argument("--user", help="TVHeadend admin user (if it asks for a login)")
+    sp.add_argument("--password", "--pass", help="password for --user")
+    sp.add_argument("--network-name", help="network to create or update (default "
+                    "'Analog (ntsc-tvh)', or 'Analog NAME (ntsc-tvh)' with --card NAME)")
+    sp.add_argument("--m3u-url", help="playlist URL TVHeadend reads (default file://M3U_FILE)")
+    mode = sp.add_mutually_exclusive_group()
+    mode.add_argument("--status", action="store_true", help="only show what TVHeadend has set up")
+    mode.add_argument("--teardown", action="store_true",
+                      help="remove the network, its muxes/services and their channels")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="print the changes (API calls) without making them")
+    sp.set_defaults(func=cmd_tvh_setup)
     return p
 
 
