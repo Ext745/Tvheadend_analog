@@ -977,7 +977,10 @@ def write_m3u(cfg, state):
         # The pipe URL IS the mux identity in TVHeadend's auto-network -> keep it
         # stable (no scan timestamps / volatile params) so rescans don't churn muxes.
         url = f"pipe://{cmd} stream {cid}"
-        lines.append(f'#EXTINF:-1 tvg-id="{tvg}" tvg-name="{label}" group-title="{group}",{label}')
+        # tvh-epg="disable": analog carries no guide data, and TVHeadend's OTA EPG grabber
+        # would otherwise subscribe to the mux and hold the tuner (applied on every re-fetch)
+        lines.append(f'#EXTINF:-1 tvg-id="{tvg}" tvg-name="{label}" group-title="{group}" '
+                     f'tvh-epg="disable",{label}')
         lines.append(url)
     os.makedirs(os.path.dirname(cfg["M3U_FILE"]), exist_ok=True)
     tmp = cfg["M3U_FILE"] + ".tmp"

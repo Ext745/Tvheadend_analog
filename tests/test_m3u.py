@@ -23,13 +23,13 @@ def active(*cids, **metrics):
 
 GOLDEN = """\
 #EXTM3U
-#EXTINF:-1 tvg-id="us-bcast:4" tvg-name="Broadcast 4" group-title="Broadcast",Broadcast 4
+#EXTINF:-1 tvg-id="us-bcast:4" tvg-name="Broadcast 4" group-title="Broadcast" tvh-epg="disable",Broadcast 4
 pipe:///usr/local/bin/ntsc-tvh stream us-bcast:4
-#EXTINF:-1 tvg-id="us-cable-hrc:23" tvg-name="Cable HRC 23" group-title="Cable HRC",Cable HRC 23
+#EXTINF:-1 tvg-id="us-cable-hrc:23" tvg-name="Cable HRC 23" group-title="Cable HRC" tvh-epg="disable",Cable HRC 23
 pipe:///usr/local/bin/ntsc-tvh stream us-cable-hrc:23
-#EXTINF:-1 tvg-id="input:composite" tvg-name="Composite In" group-title="Inputs",Composite In
+#EXTINF:-1 tvg-id="input:composite" tvg-name="Composite In" group-title="Inputs" tvh-epg="disable",Composite In
 pipe:///usr/local/bin/ntsc-tvh stream input:composite
-#EXTINF:-1 tvg-id="input:svideo" tvg-name="S-Video In" group-title="Inputs",S-Video In
+#EXTINF:-1 tvg-id="input:svideo" tvg-name="S-Video In" group-title="Inputs" tvh-epg="disable",S-Video In
 pipe:///usr/local/bin/ntsc-tvh stream input:svideo
 """
 
