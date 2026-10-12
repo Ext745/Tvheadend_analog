@@ -637,6 +637,26 @@ Implementation notes:
 This is about TVHeadend's own digital tuning, not ntsc-tvh, but it's easy to get wrong
 and hard to spot afterwards.
 
+**One command does all of the below:**
+
+```bash
+docker exec tvheadend ntsc-tvh tvh-setup --atsc --dry-run   # show what it would change
+docker exec tvheadend ntsc-tvh tvh-setup --atsc             # do it (the scan takes ~3 min)
+docker exec tvheadend ntsc-tvh tvh-setup --atsc --status    # network, tuners, muxes, guide
+```
+
+It creates one ATSC network from the `us-ATSC-center-frequencies-8VSB` list (or uses
+the one you have; it stops if there are two), switches the tuner on and links it
+(`--tuner N` picks the DVB adapter when there is more than one), turns the PSIP guide
+grabber on with a 120 s timeout, scans, switches off the muxes with no station and the
+duplicate twins, maps the channels and starts a guide grab. A tuner that is also an
+analog card gets **power save** on, so TVHeadend lets go of it when idle and ntsc-tvh
+can use it. If the scan finds no station at all, it switches nothing off and tells you
+to check the antenna. `--rescan` turns the switched-off muxes back on and scans again
+(a new station, a better antenna). Re-running it only does what is missing.
+Outside the US, `--mux-list NAME` picks another ATSC list (the table under *NTSC-M
+countries* in §12); where none is bundled, or the country isn't ATSC, set it up by hand.
+
 **1. Pick exactly one predefined mux list: `us-ATSC-center-frequencies-8VSB`.** When you
 create the ATSC network, TVHeadend offers several US lists (they come from LinuxTV's
 dtv-scan-tables). The undated one is the current band, RF 2–36. The dated ones
@@ -1196,6 +1216,8 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
 - **`ntsc-tvh tvh-setup`** sets the analog network up in TVHeadend in one command
   (network, EPG off, scan, channels), with `--dry-run`, `--status` and `--teardown`
   ([§6](#one-command-setup-ntsc-tvh-tvh-setup)).
+- **`ntsc-tvh tvh-setup --atsc`** sets TVHeadend's own ATSC network up the way §6c
+  describes: one mux list, tuner, PSIP guide, dead and duplicate muxes off, channels.
 - **The playlist turns TVHeadend's OTA EPG grabber off** for every analog channel
   (`tvh-epg="disable"`), so new channels from a rescan no longer arrive with it on.
 
