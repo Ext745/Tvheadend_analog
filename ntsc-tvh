@@ -1559,9 +1559,408 @@ def tvh_teardown(api, cfg, st):
             api.write("idnode/delete", uuid=tags[0]["uuid"])
 
 
+# ATSC (digital antenna TV): TVHeadend does this natively; tvh-setup only takes the
+# guesswork out of the setup (README 6c): one network from the one current US mux
+# list, a tuner linked to it, the PSIP guide grabber on, a scan, dead and duplicate
+# muxes switched off so the guide grab doesn't stall on them, channels mapped.
+ATSC_CLASS = "dvb_network_atsc_t"
+ATSC_FE_CLASS = "linuxdvb_frontend_atsc_t"
+ATSC_LIST = "us-ATSC-center-frequencies-8VSB"   # the undated list; see README 6c
+ATSC_NET_FIELDS = ("enabled", "networkname", "scanfile", "skipinitscan")
+ATSC_FE_FIELDS = ("enabled", "networks", "ota_epg", "powersave", "fe_path")
+OTA_TIMEOUT = 120      # PSIP grabs never report "complete", so each mux waits the full
+                       #   timeout (600 s by default): 2 min is plenty for the guide data
+
+
+def card_adapters(cfg):
+    """{DVB adapter number: ntsc-tvh card name} for hybrid tuners: a DVB adapter on the
+    same physical device as a configured card's video node."""
+    cards = {"": cfg if not cfg.get("CARD") else load_config()}
+    try:
+        names = sorted(f[:-5] for f in os.listdir(CARD_DIR) if f.endswith(".conf"))
+    except OSError:
+        names = []
+    for name in names:
+        try:
+            cards[name] = load_config(name)
+        except ChannelError:
+            pass
+    hw = {}
+    for name, c in cards.items():
+        dev = _video_hw_device(c)
+        if dev:
+            hw[dev] = f"'{name}'" if name else c["DEVICE"]
+    out = {}
+    try:
+        dvb = os.listdir(os.path.join(SYS_ROOT, "class", "dvb"))
+    except OSError:
+        return out
+    for n in dvb:
+        m = re.fullmatch(r"dvb(\d+)\.frontend\d+", n)
+        if m:
+            dev = _hw_device(os.path.realpath(os.path.join(SYS_ROOT, "class", "dvb", n, "device")))
+            if dev in hw:
+                out[int(m.group(1))] = hw[dev]
+    return out
+
+
+def _fe_adapter(fe):
+    m = re.search(r"adapter(\d+)", fe.get("fe_path") or "")
+    return int(m.group(1)) if m else None
+
+
+def _net_contents(api, net_uuid):
+    muxes = [m for m in api.grid("mpegts/mux/grid") if m.get("network_uuid") == net_uuid]
+    ids = {m["uuid"] for m in muxes}
+    services = [s for s in api.grid("mpegts/service/grid") if s.get("multiplex_uuid") in ids]
+    sids = {s["uuid"] for s in services}
+    channels = [c for c in api.grid("channel/grid") if set(c.get("services", [])) & sids]
+    return muxes, services, channels
+
+
+def atsc_read(api, cfg, args):
+    info = api.call("serverinfo")
+    api.version = v = info.get("sw_version", "?")
+    builders = api.call("mpegts/network/builders").get("entries", [])
+    cls = next((b for b in builders if b.get("class") == ATSC_CLASS), None)
+    if cls is None:
+        raise TvhError(f"TVHeadend {v} offers no ATSC-T network ('{ATSC_CLASS}')")
+    props = {p.get("id") for p in cls.get("props", [])}
+    for f in ATSC_NET_FIELDS:
+        if f not in props:
+            raise TvhError(f"TVHeadend {v}: the ATSC-T network has no field '{f}' (tvh-setup "
+                           f"was written against {TVH_TESTED}). Set it up by hand: README 6c.")
+    # every ATSC-T network: more than one for the same antenna means duplicate muxes
+    nets = []
+    for n in api.grid("mpegts/network/grid"):
+        node = api.call("idnode/load", uuid=n["uuid"]).get("entries", [{}])[0]
+        if node.get("class") == ATSC_CLASS:
+            nets.append(n)
+    name = args.network_name
+    net = None
+    if name:
+        named = [n for n in nets if n.get("networkname") == name]
+        if len(named) > 1:
+            raise TvhError(f"TVHeadend has {len(named)} ATSC networks named '{name}'")
+        net = named[0] if named else None
+    elif len(nets) == 1:
+        net = nets[0]
+    elif len(nets) > 1:
+        raise TvhError(f"TVHeadend has {len(nets)} ATSC networks ("
+                       + ", ".join(f"'{n.get('networkname')}'" for n in nets)
+                       + "). One antenna needs one network; two give every station duplicate "
+                       "muxes and slow the guide. Delete the extra one (Configuration > DVB "
+                       "Inputs > Networks), or pick one with --network-name")
+    # the predefined mux list
+    lists = api.call("dvb/scanfile/list", type="atsc-t").get("entries", [])
+    want = args.mux_list or ATSC_LIST
+    scanfile = next((e for e in lists if e.get("val", "").split(": ", 1)[-1] == want), None)
+    # the ATSC (antenna) side of each DVB tuner
+    tuners = []
+    for ad in api.call("hardware/tree", uuid="root"):
+        for fe in api.call("hardware/tree", uuid=ad["uuid"]):
+            if fe.get("class") != ATSC_FE_CLASS:
+                continue
+            p = {x["id"]: x.get("value") for x in fe.get("params", [])}
+            for f in ATSC_FE_FIELDS:
+                if f not in p:
+                    raise TvhError(f"TVHeadend {v}: a DVB tuner has no field '{f}' (tvh-setup "
+                                   f"was written against {TVH_TESTED}). Set it up by hand: "
+                                   f"README 6c.")
+            tuners.append(dict(p, uuid=fe["uuid"], name=p.get("displayname") or fe.get("text")))
+    hybrid = card_adapters(cfg)
+    for t in tuners:
+        t["adapter"] = _fe_adapter(t)
+        t["card"] = hybrid.get(t["adapter"])
+    muxes = services = channels = []
+    if net is not None:
+        muxes, services, channels = _net_contents(api, net["uuid"])
+        _need(muxes, "frequency", "a mux", v)
+        _need(muxes, "scan_result", "a mux", v)
+    mods = api.call("epggrab/module/list").get("entries", [])
+    psip = next((m for m in mods if "PSIP" in m.get("title", "")), None)
+    epgconf = {p["id"]: p.get("value") for p in
+               api.call("epggrab/config/load").get("entries", [{}])[0].get("params", [])}
+    events = api.call("epg/events/grid", limit=1).get("totalCount")
+    return {"version": v, "name": name or "ATSC", "net": net, "nets": nets, "muxes": muxes,
+            "services": services, "channels": channels, "tuners": tuners, "lists": lists,
+            "scanfile": scanfile, "want_list": want, "psip": psip, "epgconf": epgconf,
+            "events": events}
+
+
+def atsc_dead(muxes, services):
+    """(muxes to switch off, frequencies carried twice that need a person to pick).
+
+    Off: scanned and failed with nothing on it (no station broadcasts there), and the
+    twin of a frequency that two mux lists both added -- it carries the same stations,
+    so mapping both would give every station two channels. The twin kept is the one
+    whose services have channels, else the one with more services; the other is only
+    switched off if none of its services has a channel yet."""
+    mapped = {s.get("multiplex_uuid") for s in services if s.get("channel")}
+    on = [m for m in muxes if m.get("enabled")]
+    off = [m for m in on if m.get("scan_result") == 2 and not m.get("num_svc")]
+    twice = []
+    by_mhz = {}
+    for m in on:
+        if m.get("num_svc"):
+            by_mhz.setdefault(round(m.get("frequency", 0) / 1e6), []).append(m)
+    for mhz, group in sorted(by_mhz.items()):
+        if len(group) < 2:
+            continue
+        group.sort(key=lambda m: (m["uuid"] not in mapped, -m.get("num_svc", 0)))
+        extra = group[1:]
+        if any(m["uuid"] in mapped for m in extra):
+            twice.append(mhz)
+        else:
+            off += extra
+    return off, twice
+
+
+def atsc_pick_tuners(st, want):
+    """The tuners for the network: --tuner (adapter number or part of its name), else the
+    ones already linked and enabled, else the only one there is."""
+    tuners, net = st["tuners"], st["net"]
+    if want:
+        hits = [t for t in tuners if str(t["adapter"]) == want or want.lower() in t["name"].lower()]
+        if not hits:
+            raise TvhError(f"no ATSC tuner matches --tuner {want!r}; tuners: "
+                           + "; ".join(f"{t['adapter']}: {t['name']}" for t in tuners))
+        return hits
+    linked = [t for t in tuners if t["enabled"] and net and net["uuid"] in (t["networks"] or [])]
+    if linked:
+        return linked
+    if len(tuners) == 1:
+        return tuners
+    if not tuners:
+        raise TvhError("TVHeadend sees no ATSC tuner (is /dev/dvb passed to the container?)")
+    raise TvhError("pick the tuner for ATSC with --tuner N (adapter number):\n"
+                   + "\n".join(f"  {t['adapter']}: {t['name']}"
+                               + (f"  (also the analog tuner {t['card']})" if t["card"] else "")
+                               for t in tuners))
+
+
+def _cron_times(cron):
+    """'4 2 * * *' lines of TVHeadend's OTA cron as '02:04' times."""
+    out = []
+    for ln in (cron or "").splitlines():
+        f = ln.split()
+        if len(f) >= 2 and not ln.startswith("#") and f[0].isdigit() and f[1].isdigit():
+            out.append(f"{int(f[1]):02d}:{int(f[0]):02d}")
+    return out
+
+
+def atsc_print_status(api, st):
+    print(f"TVHeadend {st['version']} at {api.url}")
+    net = st["net"]
+    if net is None:
+        print(f"ATSC network: none yet -- `ntsc-tvh tvh-setup --atsc` creates '{st['name']}' "
+              f"from the {st['want_list']} list")
+    else:
+        print(f"ATSC network: '{net['networkname']}', "
+              f"{'enabled' if net.get('enabled') else 'DISABLED'}")
+    for t in st["tuners"]:
+        linked = net is not None and net["uuid"] in (t["networks"] or [])
+        state = ("in use for ATSC" if t["enabled"] and linked else
+                 "enabled, NOT linked to the network" if t["enabled"] else "off")
+        print(f"tuner {t['adapter']}:     {t['name']}: {state}")
+        if t["enabled"] and linked:
+            print(f"              guide (OTA EPG) {'on' if t['ota_epg'] else 'OFF'}, "
+                  f"power save {'on' if t['powersave'] else 'off'}")
+        if t["card"] and t["enabled"]:
+            print(f"              also the analog tuner {t['card']}: "
+                  + ("analog works while ATSC is idle (power save on)" if t["powersave"] else
+                     "power save off keeps it open, so its analog RF channels won't tune "
+                     "(DVB_GUARD); composite/S-Video still work"))
+    if net is None:
+        return
+    muxes = st["muxes"]
+    on = [m for m in muxes if m.get("enabled")]
+    live = [m for m in on if m.get("num_svc")]
+    unscanned = [m for m in on if not m.get("scan_result")]
+    dead, twice = atsc_dead(muxes, st["services"])
+    print(f"muxes:        {len(muxes)}: {len(live)} with stations, {len(muxes) - len(on)} "
+          f"switched off" + (f", {len(unscanned)} not scanned yet" if unscanned else "")
+          + (f", {len(dead)} dead or duplicate still on" if dead else ""))
+    if twice:
+        print(f"              {', '.join(f'{f} MHz' for f in twice)}: two muxes each, both "
+              f"with channels (the same stations twice): delete one channel of each pair, "
+              f"then switch the emptied mux off")
+    unmapped = [s for s in st["services"] if not s.get("channel")]
+    print(f"channels:     {len(st['channels'])}"
+          + (f" ({len(unmapped)} service(s) not mapped yet)" if unmapped else ""))
+    psip = st["psip"]
+    psip_on = psip is not None and psip.get("status") == "epggrabmodEnabled"
+    times = _cron_times(st["epgconf"].get("ota_cron"))
+    print(f"guide:        PSIP grabber {'on' if psip_on else 'OFF'}, {st['events'] or 0} "
+          f"programme(s) in the guide" + (f", grabbed daily at {' and '.join(times)}"
+                                          if times else ""))
+    if len(st["nets"]) > 1:
+        print(f"warning:      {len(st['nets'])} ATSC networks: one antenna needs one "
+              f"(duplicates double the muxes and slow the guide)")
+
+
+def atsc_setup(api, cfg, args, st):
+    dry = api.dry_run
+    net = st["net"]
+    # 1. the network, from the one current mux list
+    if net is None:
+        sf = st["scanfile"]
+        if sf is None:
+            raise TvhError(f"TVHeadend {st['version']} has no predefined mux list "
+                           f"'{st['want_list']}'; pick one of: "
+                           + ", ".join(e["val"] for e in st["lists"]))
+        print(f"1. create ATSC network '{st['name']}' from the {st['want_list']} mux list")
+        r = api.write("mpegts/network/create", **{"class": ATSC_CLASS, "conf": {
+            "enabled": True, "networkname": st["name"], "scanfile": sf["key"],
+            "skipinitscan": True}})
+        if dry:
+            net = {"uuid": "<new network>", "networkname": st["name"]}
+        else:
+            if not r.get("uuid"):
+                raise TvhError(f"TVHeadend {st['version']} didn't return the new network's uuid")
+            net = {"uuid": r["uuid"], "networkname": st["name"]}
+            tvh_wait("the mux list", lambda: _muxes(api, net["uuid"]), 30)
+    elif not net.get("enabled"):
+        print(f"1. enable ATSC network '{net['networkname']}'")
+        api.write("idnode/save", node={"uuid": net["uuid"], "enabled": True})
+    else:
+        print(f"1. ATSC network '{net['networkname']}' is there")
+
+    # 2. the tuner(s): on, linked, guide grabbing on; a tuner that is also an analog card
+    #    gets power save, so TVHeadend lets go of it when idle and analog can use it
+    for t in atsc_pick_tuners(dict(st, net=net), args.tuner):
+        change = {}
+        if not t["enabled"]:
+            change["enabled"] = True
+            if t["card"] and not t["powersave"]:
+                change["powersave"] = True
+        if net["uuid"] not in (t["networks"] or []):
+            change["networks"] = list(t["networks"] or []) + [net["uuid"]]
+        if not t["ota_epg"]:
+            change["ota_epg"] = True
+        if change:
+            print(f"2. tuner {t['adapter']} ({t['name']}): " + ", ".join(
+                "link to the network" if k == "networks" else f"{k} -> {v}"
+                for k, v in change.items()))
+            api.write("idnode/save", node=dict(change, uuid=t["uuid"],
+                                               networks=change.get("networks", t["networks"])))
+        else:
+            print(f"2. tuner {t['adapter']} ({t['name']}) already set")
+        if t["card"]:
+            print(f"   (it is also the analog tuner {t['card']}: one tuner, analog or digital at a "
+                  f"time{'' if t['powersave'] or change.get('powersave') else '; turn power save on so analog can use it when ATSC is idle'})")
+
+    # 3. the guide: PSIP grabber on, and a timeout that doesn't stall on every mux
+    psip, conf = st["psip"], st["epgconf"]
+    todo = []
+    if psip is not None and psip.get("status") != "epggrabmodEnabled":
+        todo.append("turn the PSIP guide grabber on")
+        api.write("idnode/save", node={"uuid": psip["uuid"], "enabled": True})
+    if (conf.get("ota_timeout") or 0) > OTA_TIMEOUT:
+        todo.append(f"guide grab timeout {conf['ota_timeout']} s -> {OTA_TIMEOUT} s per mux")
+        api.write("epggrab/config/save", node={"ota_timeout": OTA_TIMEOUT})
+    print("3. " + ("; ".join(todo) if todo else "guide grabber already set"))
+    if dry and net["uuid"] == "<new network>":
+        print("   (then: scan the muxes, switch off the dead ones, map channels, grab the "
+              "guide; run without --dry-run to see it)")
+        return
+
+    # 4. scan what hasn't been scanned (a full scan takes a few minutes); --rescan
+    #    turns the switched-off muxes back on and scans everything again
+    muxes = _muxes(api, net["uuid"]) if not dry else st["muxes"]
+    if args.rescan:
+        off = [m for m in muxes if not m.get("enabled")]
+        if off:
+            print(f"4. turn {len(off)} switched-off mux(es) back on to check them again")
+            for m in off:
+                api.write("idnode/save", node={"uuid": m["uuid"], "enabled": True})
+    unscanned = [m for m in muxes if m.get("enabled") and not m.get("scan_result")]
+    if unscanned or args.rescan:
+        n = len([m for m in muxes if m.get("enabled") or args.rescan])
+        print(f"4. scan {n if args.rescan else len(unscanned)} mux(es): a few seconds "
+              f"each, a few minutes in all")
+        api.write("mpegts/network/scan", uuid=net["uuid"])
+        if not dry:
+            time.sleep(3)
+            shown = {"msg": None, "at": 0.0}
+
+            def done():
+                ms = _muxes(api, net["uuid"])
+                busy = [m for m in ms if m.get("scan_state")]
+                live = sum(1 for m in ms if m.get("num_svc"))
+                msg = f"   {len(ms) - len(busy)} of {len(ms)} scanned, {live} with stations"
+                if msg != shown["msg"] and (not busy or time.monotonic() - shown["at"] > 30):
+                    print(msg, flush=True)
+                    shown.update(msg=msg, at=time.monotonic())
+                return not busy
+            tvh_wait("the scan", done, 60 + 30 * len(muxes), step=5)
+            muxes = _muxes(api, net["uuid"])
+    else:
+        print("4. every mux has been scanned (--rescan scans again)")
+
+    # 5. switch off dead and duplicate muxes, so the guide grab doesn't wait on each --
+    #    unless nothing at all came in: that is the antenna or the tuner, not the muxes
+    services = st["services"] if dry else _net_contents(api, net["uuid"])[1]
+    dead, _ = atsc_dead(muxes, services)
+    if not dry and not any(m.get("num_svc") for m in muxes):
+        raise TvhError(
+            f"no station on any of the {len(muxes)} muxes: the tuner got no signal at all "
+            f"(TVHeadend's log says 'scan no data'). Check that the antenna is connected to "
+            f"this tuner's antenna input, or try another tuner with --tuner N; then run "
+            f"`ntsc-tvh tvh-setup --atsc --rescan`.")
+    if dead:
+        print(f"5. switch off {len(dead)} mux(es) with no station on them (dead frequency or "
+              f"duplicate); --rescan turns them back on and checks again")
+        for m in dead:
+            api.write("idnode/save", node={"uuid": m["uuid"], "enabled": False})
+    else:
+        print("5. no dead or duplicate muxes")
+
+    # 6. channels for unmapped services (encrypted ones left out)
+    off = {m["uuid"] for m in dead}
+    unmapped = [s["uuid"] for s in services
+                if not s.get("channel") and s.get("multiplex_uuid") not in off]
+    if unmapped:
+        print(f"6. map {len(unmapped)} service(s) to channels")
+        api.write("service/mapper/save", node={
+            "services": unmapped, "check_availability": False, "encrypted": False,
+            "merge_same_name": False, "provider_tags": True, "network_tags": True})
+        if not dry:
+            tvh_wait("the channel mapping", lambda: all(
+                s.get("channel") for s in api.grid("mpegts/service/grid")
+                if s["uuid"] in unmapped), 60)
+    else:
+        print("6. every service already has a channel")
+
+    # 7. grab the guide now instead of at the next scheduled time
+    if unscanned or unmapped or args.rescan:
+        print("7. start a guide grab now (it fills over the next few minutes)")
+        api.write("epggrab/ota/trigger", trigger=5)
+    if not dry:
+        print()
+        atsc_print_status(api, atsc_read(api, cfg, argparse.Namespace(
+            network_name=net["networkname"], mux_list=args.mux_list)))
+
+
+def atsc_teardown(api, st):
+    if st["net"] is None:
+        print("nothing to remove: no ATSC network")
+        return
+    tvh_teardown(api, None, dict(st, name=st["net"]["networkname"]))
+
+
 def cmd_tvh_setup(cfg, args):
     api = TvhApi(args.url, args.user, args.password, dry_run=args.dry_run)
     try:
+        if args.atsc:
+            st = atsc_read(api, cfg, args)
+            if args.status:
+                atsc_print_status(api, st)
+            elif args.teardown:
+                atsc_teardown(api, st)
+            else:
+                atsc_setup(api, cfg, args, st)
+            return
         st = tvh_read(api, cfg, args)
         if args.status:
             tvh_print_status(api, cfg, st)
@@ -1646,6 +2045,13 @@ def build_parser():
                       help="remove the network, its muxes/services and their channels")
     sp.add_argument("--dry-run", action="store_true",
                     help="print the changes (API calls) without making them")
+    atsc = sp.add_argument_group("digital (ATSC antenna) channels instead of analog")
+    atsc.add_argument("--atsc", action="store_true",
+                      help="set up TVHeadend's own ATSC network, tuner, guide and channels")
+    atsc.add_argument("--tuner", help="DVB adapter number (or part of its name) for ATSC")
+    atsc.add_argument("--mux-list", help=f"predefined mux list (default {ATSC_LIST})")
+    atsc.add_argument("--rescan", action="store_true",
+                      help="scan every mux again, including the switched-off ones")
     sp.set_defaults(func=cmd_tvh_setup)
     return p
 
