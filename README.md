@@ -314,7 +314,42 @@ listed as always-available channels because you plug a console in on demand.
 
 ## 6. Wiring it into TVHeadend
 
-### Method A — Automatic IPTV Network (recommended)
+### One-command setup: `ntsc-tvh tvh-setup`
+
+After `ntsc-tvh scan` has written the playlist, one command makes the channels appear
+in TVHeadend, with no clicking through its UI. Run it where TVHeadend runs, so it sees
+the same playlist path:
+
+```bash
+docker exec tvheadend ntsc-tvh tvh-setup --dry-run   # show what it would change
+docker exec tvheadend ntsc-tvh tvh-setup             # do it
+docker exec tvheadend ntsc-tvh tvh-setup --status    # what TVHeadend has set up, in one screen
+docker exec tvheadend ntsc-tvh --card 800e tvh-setup # a second card gets its own network
+```
+
+It does what Method A below does by hand, through TVHeadend's web API:
+
+1. Creates an **Automatic IPTV Network** called `Analog (ntsc-tvh)` (`Analog NAME
+   (ntsc-tvh)` with `--card NAME`) reading `file:///var/lib/ntsc-tvh/ntsc.m3u`, with
+   **Maximum # input streams = 1**. If that network exists, it fixes those two settings
+   in place; if you made one by hand under another name that reads the same playlist,
+   it uses that one. It never makes a second network.
+2. Turns the **OTA EPG grabber off** on each of its muxes (see the warning below).
+3. **Scans** the muxes that have no service yet (each tunes the card for a few seconds).
+4. **Maps** the new services to channels, named as in the playlist.
+
+Re-running it is safe: it only does what is missing, so run it again after a rescan
+adds channels. `--teardown` removes the network with its muxes and services, the
+channels that came only from it, and its channel tag; nothing else. If TVHeadend asks
+for a login, add `--user admin --password …`; `--url` points it at another address
+(default `http://localhost:9981`).
+
+It is a convenience layer only: if a future TVHeadend changes its API, `tvh-setup`
+stops with a message naming the field it couldn't find and the TVHeadend version, and
+streaming, scanning and the playlist keep working. Set things up by hand then, below.
+Tested against TVHeadend 4.3-2891.
+
+### Method A — Automatic IPTV Network (by hand)
 
 One network, auto-built from the generated M3U, auto-refreshed.
 
@@ -346,8 +381,9 @@ their mappings.
 **Turn off the OTA EPG grabber on this network.** Analog pipe muxes carry no
 EIT/PSIP, so EPG grabbing finds nothing — but it *subscribes to the mux*, which
 on a single tuner races the scan and live viewing for the device and causes
-intermittent "scan no data" / "tuner busy". Network/EPG settings → disable
-over-the-air EPG for the analog network.
+intermittent "scan no data" / "tuner busy". The playlist does this for you: every entry
+carries `tvh-epg="disable"`, which TVHeadend applies when it creates the mux and again
+on every re-fetch. (By hand: each mux's **EPG scan** setting → **Disable**.)
 
 **When typing the `file://` URL, don't let a trailing newline in.** If the IPTV
 network reports it can't open the file and the error shows the path with the
@@ -815,7 +851,7 @@ ntsc-tvh --card 800e scan          # or: ntsc-tvh --card 800e m3u  (line inputs 
 - In TVHeadend, add a second **IPTV Automatic Network** whose URL is
   `file:///var/lib/ntsc-tvh/NAME/ntsc.m3u`, with **Maximum # input streams = 1** like
   the first one (one stream per tuner). Then scan it once, which creates the services,
-  and map them to channels.
+  and map them to channels. Or let `ntsc-tvh --card NAME tvh-setup` do all of that.
 - In Docker, mount the folder: `- /home/docker/stacks/tvheadend/ntsc-tvh.d:/etc/ntsc-tvh.d:ro`,
   and map both video devices (by `/dev/v4l/by-id/...` so a replug doesn't swap them).
 
@@ -1156,6 +1192,11 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
   HVR-1950, analog profiles now send their first byte in 0.6–1.0 s (was ~4.6 s) and
   `digital-h264-aac-mpegts` in ~1.4 s. Re-run `tvh-stream-profiles` to update existing
   profiles.
+- **`ntsc-tvh tvh-setup`** sets the analog network up in TVHeadend in one command
+  (network, EPG off, scan, channels), with `--dry-run`, `--status` and `--teardown`
+  ([§6](#one-command-setup-ntsc-tvh-tvh-setup)).
+- **The playlist turns TVHeadend's OTA EPG grabber off** for every analog channel
+  (`tvh-epg="disable"`), so new channels from a rescan no longer arrive with it on.
 
 ---
 
