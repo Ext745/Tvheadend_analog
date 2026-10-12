@@ -213,9 +213,9 @@ class AtscTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm:
             self.run_cmd()
         self.assertIn("pick the tuner for ATSC with --tuner N", str(cm.exception))
-        self.run_cmd(tuner="1")
-        self.assertTrue(self.tvh.tuners["fe1"]["enabled"])
-        self.assertFalse(self.tvh.tuners["fe0"]["enabled"])
+        self.run_cmd(tuner="0")         # both names end in "ATSC-T #0": the number is the adapter
+        self.assertTrue(self.tvh.tuners["fe0"]["enabled"])
+        self.assertFalse(self.tvh.tuners["fe1"]["enabled"])
 
     def test_two_atsc_networks_is_an_error(self):
         self.tvh.add_net("ATSC")

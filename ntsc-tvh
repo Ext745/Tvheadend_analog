@@ -1721,7 +1721,10 @@ def atsc_pick_tuners(st, want):
     ones already linked and enabled, else the only one there is."""
     tuners, net = st["tuners"], st["net"]
     if want:
-        hits = [t for t in tuners if str(t["adapter"]) == want or want.lower() in t["name"].lower()]
+        if want.isdigit():       # an adapter number ("0" is also in every "ATSC-T #0" name)
+            hits = [t for t in tuners if t["adapter"] == int(want)]
+        else:
+            hits = [t for t in tuners if want.lower() in t["name"].lower()]
         if not hits:
             raise TvhError(f"no ATSC tuner matches --tuner {want!r}; tuners: "
                            + "; ".join(f"{t['adapter']}: {t['name']}" for t in tuners))
@@ -1769,8 +1772,9 @@ def atsc_print_status(api, st):
         if t["card"] and t["enabled"]:
             print(f"              also the analog tuner {t['card']}: "
                   + ("analog works while ATSC is idle (power save on)" if t["powersave"] else
-                     "power save off keeps it open, so its analog RF channels won't tune "
-                     "(DVB_GUARD); composite/S-Video still work"))
+                     "power save off keeps it open, so its analog channels won't tune "
+                     "(DVB_GUARD), and even composite/S-Video can wedge it: turn power save "
+                     "on"))
     if net is None:
         return
     muxes = st["muxes"]
