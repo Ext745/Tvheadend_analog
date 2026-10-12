@@ -9,6 +9,7 @@ matching is exercised without hardware.
 import argparse
 import io
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -77,7 +78,7 @@ class DvbGuard(unittest.TestCase):
     def test_nothing_open(self):
         self.process(100, "bash")
         self.assertEqual(ntsc.dvb_users(self.cfg), {})
-        ntsc.check_dvb_idle(self.cfg, rf=True)
+        ntsc.check_dvb_idle(self.cfg)
 
     def test_finds_users_by_device_number(self):
         self.process(200, "tvheadend", "frontend", "demux", "demux", "dvr")
@@ -88,20 +89,18 @@ class DvbGuard(unittest.TestCase):
             "dvr": [(200, "tvheadend")],
         })
 
-    def test_idle_frontend_blocks_rf_but_not_line_inputs(self):
-        # Seen live: an idle TVHeadend holding only frontend0 wedged the 800e on an RF retune.
+    def test_idle_frontend_blocks_rf_and_line_inputs(self):
+        # Seen live: an idle TVHeadend holding only frontend0 wedged the 800e on an RF retune,
+        # and again on a composite capture.
         self.process(200, "tvheadend", "frontend")
         with self.assertRaisesRegex(ntsc.ChannelError, r"tvheadend \(pid 200\) has the DVB frontend open"):
-            ntsc.check_dvb_idle(self.cfg, rf=True)
-        ntsc.check_dvb_idle(self.cfg, rf=False)
+            ntsc.check_dvb_idle(self.cfg)
 
-    def test_active_reception_blocks_line_inputs_too(self):
+    def test_active_reception_blocks(self):
         # Seen live: composite streaming during an ATSC EPG grab wedged the 800e.
         self.process(200, "tvheadend", "frontend", "demux", "dvr")
-        for rf in (True, False):
-            with self.subTest(rf=rf):
-                with self.assertRaisesRegex(ntsc.ChannelError, "Power save"):
-                    ntsc.check_dvb_idle(self.cfg, rf=rf)
+        with self.assertRaisesRegex(ntsc.ChannelError, "Power save"):
+            ntsc.check_dvb_idle(self.cfg)
 
     def test_dvb_on_another_device_is_ignored(self):
         self.adapter(1, f"{USB}/1-2/1-2:1.0", nodes={"frontend": "/dev/null"})
@@ -110,13 +109,12 @@ class DvbGuard(unittest.TestCase):
         os.remove(os.path.join(self.sys, "class/dvb/dvb0.frontend0"))
         self.process(300, "tvheadend", "frontend")
         self.assertEqual(ntsc.dvb_users(self.cfg), {})
-        ntsc.check_dvb_idle(self.cfg, rf=True)
+        ntsc.check_dvb_idle(self.cfg)
 
     def test_no_dvb_side_or_no_sysfs(self):
         self.process(200, "tvheadend", "frontend")
         with mock.patch.object(ntsc, "SYS_ROOT", os.path.join(self.tmp.name, "nowhere")):
             self.assertEqual(ntsc.dvb_users(self.cfg), {})
-        import shutil
         shutil.rmtree(os.path.join(self.sys, "class", "dvb"))
         self.assertEqual(ntsc.dvb_users(self.cfg), {})
 
@@ -129,7 +127,7 @@ class DvbGuard(unittest.TestCase):
 
     def test_guard_can_be_disabled(self):
         self.process(200, "tvheadend", "frontend", "demux", "dvr")
-        ntsc.check_dvb_idle(dict(self.cfg, DVB_GUARD="0"), rf=True)
+        ntsc.check_dvb_idle(dict(self.cfg, DVB_GUARD="0"))
 
     def test_tune_refuses_before_touching_the_device(self):
         self.process(200, "tvheadend", "frontend")
@@ -137,9 +135,10 @@ class DvbGuard(unittest.TestCase):
         with mock.patch.object(ntsc, "run", fake):
             with self.assertRaises(ntsc.ChannelError):
                 ntsc.tune(self.cfg, ntsc.parse_channel("us-bcast:7"))
+            # Seen live: a composite capture with only frontend0 open wedged the 800e too.
+            with self.assertRaises(ntsc.ChannelError):
+                ntsc.tune(self.cfg, ntsc.parse_channel("input:composite"))
             self.assertEqual(fake.calls, [])
-            ntsc.tune(self.cfg, ntsc.parse_channel("input:composite"))   # idle FE: fine
-        self.assertIn("--set-input=1", fake.opts())
 
     def no_device_access(self):
         """Patch everything that would open the analog node; fail the test if it is used."""
@@ -159,37 +158,28 @@ class DvbGuard(unittest.TestCase):
             with self.assertRaises(ntsc.ChannelError):
                 ntsc.cmd_scan(self.cfg, args)
 
-    def test_doctor_skips_probe_while_dvb_is_receiving(self):
-        self.process(200, "tvheadend", "frontend", "demux", "dvr")
-        out = io.StringIO()
-        with self.no_device_access(), redirect_stdout(out), self.assertRaises(SystemExit):
-            ntsc.cmd_doctor(self.cfg, argparse.Namespace())
-        self.assertIn("[!!] DVB side of this tuner idle", out.getvalue())
-        self.assertIn("device probe was skipped", out.getvalue())
-
-    def test_doctor_probes_but_warns_with_idle_frontend(self):
-        self.process(200, "tvheadend", "frontend")
-        out = io.StringIO()
-        info = {"driver": "em28xx", "card": "Pinnacle PCTV HD Pro Stick", "pixfmt": "YUYV",
-                "hw_encoder": False, "inputs": [(0, "Television")]}
-        with mock.patch.object(ntsc, "device_info", return_value=info), \
-             mock.patch.object(ntsc, "autodetect_alsa", return_value="hw:1,0"), \
-             redirect_stdout(out), self.assertRaises(SystemExit):
-            ntsc.cmd_doctor(self.cfg, argparse.Namespace())
-        self.assertIn("[OK] driver detected  em28xx", out.getvalue())
-        self.assertIn("RF tuning will be refused", out.getvalue())
+    def test_doctor_skips_probe_while_dvb_is_open(self):
+        for kinds in (("frontend",), ("frontend", "demux", "dvr")):
+            with self.subTest(kinds=kinds):
+                self.process(200, "tvheadend", *kinds)
+                out = io.StringIO()
+                with self.no_device_access(), redirect_stdout(out), self.assertRaises(SystemExit):
+                    ntsc.cmd_doctor(self.cfg, argparse.Namespace())
+                self.assertIn("[!!] DVB side of this tuner idle", out.getvalue())
+                self.assertIn("device probe was skipped", out.getvalue())
+                shutil.rmtree(os.path.join(self.proc, "200"))
 
     def test_scan_aborts_when_dvb_grabs_the_tuner_mid_scan(self):
         fake = FakeV4L2()
         calls = {"n": 0}
         real_check = ntsc.check_dvb_idle
 
-        def check(cfg, rf):
+        def check(cfg):
             calls["n"] += 1
             if calls["n"] == 5:   # check 1 is before the probe, 2.. before each channel:
                                   # TVHeadend starts an EPG grab before channel 4
                 self.process(200, "tvheadend", "frontend", "demux")
-            return real_check(cfg, rf)
+            return real_check(cfg)
 
         args = argparse.Namespace(tables="us-bcast", method="signal", threshold=None,
                                   dwell=0, wait=0, no_m3u=False)

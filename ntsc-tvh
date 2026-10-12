@@ -344,7 +344,7 @@ def set_freq(cfg, mhz):
 
 def tune(cfg, chan):
     """Select input, standard, and (for tuner channels) frequency."""
-    check_dvb_idle(cfg, chan["kind"] == "tuner")
+    check_dvb_idle(cfg)
     idx = resolve_input_index(cfg, chan["input"])
     v4l2(cfg, f"--set-input={idx}")
     set_standard(cfg)
@@ -602,20 +602,21 @@ def dvb_users(cfg):
     return users
 
 
-def check_dvb_idle(cfg, rf):
+DVB_BUSY = ("frontend", "demux", "dvr")
+
+
+def check_dvb_idle(cfg):
     """Refuse analog use while the DVB side of the same tuner is busy (DVB_GUARD=1).
 
     On hybrid cards whose analog and digital sides share one tuner (em28xx + xc3028 in
-    the Pinnacle 800e) the driver doesn't stop both being used. Retuning the analog side
-    while anything holds the DVB frontend open -- even an idle TVHeadend -- makes the
-    tuner flip between analog and ATSC firmware and wedges the card's I2C bus until it is
-    unplugged. Line inputs don't retune, so for them only active DVB reception
-    (demux/dvr open) counts."""
+    the Pinnacle 800e) the driver doesn't stop both being used. Using the analog side
+    while anything holds the DVB frontend open -- even an idle TVHeadend -- wedges the
+    card's I2C bus until it is unplugged: seen for an RF retune and for a composite
+    capture alike, so line inputs get no exemption."""
     if cfg["DVB_GUARD"] != "1":
         return
     users = dvb_users(cfg)
-    busy = ("frontend", "demux", "dvr") if rf else ("demux", "dvr")
-    hits = [(k, pid, comm) for k in busy for pid, comm in users.get(k, [])]
+    hits = [(k, pid, comm) for k in DVB_BUSY for pid, comm in users.get(k, [])]
     if not hits:
         return
     who = ", ".join(sorted({f"{comm} (pid {pid}) has the DVB {k} open" for k, pid, comm in hits}))
@@ -724,7 +725,7 @@ def supervise(cfg, cmd, lock, via_cat):
 
 def cmd_stream(cfg, args):
     chan = parse_channel(args.channel)
-    check_dvb_idle(cfg, chan["kind"] == "tuner")   # before device_info() opens the node
+    check_dvb_idle(cfg)                            # before device_info() opens the node
     info = device_info(cfg)
     wait = float(args.wait if args.wait is not None else cfg["SCAN_LOCK_WAIT"])
     with TunerLock(cfg["LOCK_FILE"], wait=wait) as lock:
@@ -876,7 +877,7 @@ def cmd_scan(cfg, args):
     dwell = float(args.dwell if args.dwell is not None else cfg["SCAN_DWELL"])
     wait = float(args.wait if args.wait is not None else cfg["SCAN_LOCK_WAIT"])
 
-    check_dvb_idle(cfg, rf=True)                    # before device_info() opens the node
+    check_dvb_idle(cfg)                    # before device_info() opens the node
     info = device_info(cfg)
     cands = all_channels(tables)
     found = []
@@ -892,7 +893,7 @@ def cmd_scan(cfg, args):
             for c in cands:
                 # A tuner that won't tune (or one the DVB side grabbed mid-scan) is a device
                 # fault, not an empty channel: abort, keeping the previous state/M3U.
-                check_dvb_idle(cfg, rf=True)
+                check_dvb_idle(cfg)
                 set_freq(cfg, c["freq"])
                 time.sleep(dwell)
                 active, metrics, idle = judge_channel(cfg, info, c, method, thr, reports)
@@ -1110,10 +1111,10 @@ def cmd_doctor(cfg, args):
         users = dvb_users(cfg) if cfg["DVB_GUARD"] == "1" else {}
         held = "; ".join(f"{k}: " + ", ".join(f"{c} ({p})" for p, c in v)
                          for k, v in sorted(users.items()))
-        if "demux" in users or "dvr" in users:
+        if any(k in users for k in DVB_BUSY):
             # Even opening the analog node switches an em28xx out of digital mode.
             chk("DVB side of this tuner idle", False,
-                f"{held} -- digital is receiving, so the device probe was skipped")
+                f"{held} -- the digital side is open, so the device probe was skipped")
         else:
             info = None
             try:
@@ -1131,7 +1132,7 @@ def cmd_doctor(cfg, args):
                 chk("device probe", False, str(exc))
             if users:
                 chk("DVB side of this tuner idle", False,
-                    f"{held} -- RF tuning will be refused (see README: 'Power save')")
+                    f"{held} -- the DVB side is open (see README: 'Power save')")
             elif info and not getattr(args, "no_capture", False):
                 doctor_capture(cfg, info, chk)
     print("status:", "all good" if ok else "issues found")
@@ -1772,9 +1773,8 @@ def atsc_print_status(api, st):
         if t["card"] and t["enabled"]:
             print(f"              also the analog tuner {t['card']}: "
                   + ("analog works while ATSC is idle (power save on)" if t["powersave"] else
-                     "power save off keeps it open, so its analog channels won't tune "
-                     "(DVB_GUARD), and even composite/S-Video can wedge it: turn power save "
-                     "on"))
+                     "power save off keeps it open, so its analog channels and "
+                     "composite/S-Video won't start (DVB_GUARD): turn power save on"))
     if net is None:
         return
     muxes = st["muxes"]

@@ -930,6 +930,8 @@ went wrong in testing:
 - Composite streaming while TVHeadend ran an OTA EPG grab on an ATSC mux.
 - An RF analog retune while an **idle** TVHeadend merely held `frontend0` open:
   the xc3028 flipped between analog and ATSC firmware every second.
+- A composite capture while an idle TVHeadend held `frontend0` open (adapter
+  power save off) -- no retune at all.
 
 Either way the stick's I2C bus wedged. `dmesg` filled with `lgdt330x ...
 i2c_read_demod_bytes ... error (ret == -6)`, TVHeadend logged `FE_READ_STATUS
@@ -938,12 +940,12 @@ not tune ... 0.000 MHz`. Only unplugging the stick cleared it.
 
 `ntsc-tvh` now refuses instead (`DVB_GUARD=1`, the default): `the digital (DVB)
 side of this tuner is in use: tvheadend (pid N) has the DVB frontend open ...`.
-RF channels are refused while anything holds the DVB frontend open;
-composite/S-Video only while DVB is actually receiving (demux/dvr open). The
-check runs before ntsc-tvh opens the analog node at all: on the em28xx, even
+Every analog channel, composite/S-Video included, is refused while anything
+holds the DVB frontend open -- so on a hybrid card, turn on TVHeadend's **Power
+save** for the ATSC adapter (it closes the frontend when idle). The check runs before ntsc-tvh opens the analog node at all: on the em28xx, even
 `v4l2-ctl` opening `/dev/video0` switches the card to analog mode and broke a
 live ATSC stream in testing. `doctor` reports the DVB state too, and skips its
-device probe while digital is receiving.
+device probe while the DVB side is open.
 
 The guard only covers one direction. If TVHeadend starts a DVB subscription (a
 recording, a client, an EPG grab) while an analog stream is already running,
