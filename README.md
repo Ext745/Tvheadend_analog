@@ -1074,6 +1074,10 @@ other way round after a reboot.
   See [NTSC-M countries](#ntsc-m-countries) below for where the video standard fits.
 - **Stable-URL contract** with the Automatic Network is load-bearing — honored
   here, but don't defeat it by templating the URLs yourself.
+- **No set-top box control (yet).** The HVR-1950's IR blaster already works in the
+  stock kernel (`/dev/lirc0`), but changing a cable/satellite box's channel before
+  capturing its line output isn't implemented. What was checked and what it would
+  need: [docs/future-ir-blaster.md](docs/future-ir-blaster.md).
 
 ### NTSC-M countries
 
