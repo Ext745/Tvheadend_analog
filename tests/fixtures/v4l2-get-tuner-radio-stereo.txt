@@ -1,0 +1,8 @@
+Tuner 0:
+	Name                 : 
+	Type                 : radio
+	Capabilities         : 62.5 Hz stereo freq-bands 
+	Frequency range      : 65.000 MHz - 108.000 MHz
+	Signal strength/AFC  : 53%/0
+	Current audio mode   : stereo
+	Available subchannels: mono stereo

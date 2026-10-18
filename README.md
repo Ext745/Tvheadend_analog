@@ -282,7 +282,7 @@ ffprobe test.ts                          # expect mpeg2video + mp2/ac3 in an mpe
 
 ## 5. Channel IDs and frequency plans
 
-Channels are addressed as **`TABLE:CHANNEL`** or **`input:NAME`**:
+Channels are addressed as **`TABLE:CHANNEL`**, **`input:NAME`** or **`fm:MHZ`**:
 
 | ID example        | Meaning                                             |
 |-------------------|-----------------------------------------------------|
@@ -292,6 +292,7 @@ Channels are addressed as **`TABLE:CHANNEL`** or **`input:NAME`**:
 | `us-cable-hrc:2`  | Cable **HRC** channel 2 (54.000 MHz)                |
 | `input:composite` | The composite (RCA) line input — game consoles etc. |
 | `input:svideo`    | The S-Video line input                              |
+| `fm:101.1`        | FM radio, 101.1 MHz (cards with a radio node, §9b)  |
 
 Four built-in plans (visual/picture-carrier frequencies):
 
@@ -820,6 +821,42 @@ not the script.
 
 ---
 
+## 9b. FM radio
+
+On a card with an FM radio node, FM stations become channels in TVHeadend, as
+audio-only streams marked as radio services. Today that means the **HVR-1950 with the
+pvrusb2 FM radio patches**, which aren't in the kernel yet: with a stock kernel the
+card has no `/dev/radio0`, and `doctor` says so.
+
+FM isn't scanned. On the HVR-1950 the signal meter reads the IF AGC, which stays
+high between stations in a busy band, so a scan can't tell stations from the gaps
+between them. List the stations you want instead, with an optional name each:
+
+```ini
+# /etc/ntsc-tvh.conf
+FM_STATIONS=88.3,98.7=ESPN,101.1=CBS-FM
+```
+
+`ntsc-tvh m3u` (or the next `scan`) adds them to the playlist in a "Radio" group,
+and TVHeadend picks them up like the analog channels. Check one first:
+
+```bash
+ntsc-tvh signal fm:101.1      # signal % and whether a stereo pilot is there
+ntsc-tvh stream fm:101.1 > fm.ts
+```
+
+- **The radio node is found automatically** on the same card as `DEVICE`. In Docker,
+  map it in next to the video node (`- /dev/radio0:/dev/radio0`); it has no
+  `/dev/v4l/by-id` link, so `doctor` tells you if it's missing.
+- **The stream is audio only**: the card's MP2 audio copied as it is (or re-encoded
+  per `AUDIO_CODEC`), in an MPEG-TS marked as a radio service.
+- **One tuner**: FM, analog TV, composite and ATSC share it, so the tuner lock and
+  `DVB_GUARD` apply to FM exactly as to analog TV.
+- **"stereo" in `signal`** is the more reliable sign that a station is there; it
+  needs the FM stereo firmware on the HVR-1950 (otherwise radio is mono).
+
+---
+
 ## 10. Configuration reference
 
 All keys live in `/etc/ntsc-tvh.conf` (or as env vars), one `KEY=VALUE` per line;
@@ -844,6 +881,8 @@ a `# comment` after whitespace is ignored. The most useful:
 | `SCAN_THRESHOLD`       | `35`                             | signal % cutoff                           |
 | `SCAN_LOCK_WAIT`       | `5`                              | seconds to wait for the tuner lock        |
 | `INPUTS_ALWAYS_ACTIVE` | `1`                              | list composite/svideo as channels         |
+| `FM_STATIONS`          | *(none)*                         | FM radio channels, e.g. `98.7,101.1=CBS-FM` (§9b) |
+| `RADIO_DEVICE`         | *(auto)*                         | FM radio node; auto = the one on `DEVICE`'s card |
 | `SELF_PATH`            | *(auto)*                         | path written into M3U pipe:// URLs         |
 
 ### More than one card
@@ -1171,6 +1210,10 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
 
 ### Since v2
 
+- **FM radio channels** (§9b): `fm:MHZ` channel IDs and `FM_STATIONS` add FM
+  stations to the playlist as audio-only radio services, on cards with a radio
+  node (the HVR-1950 with the pvrusb2 FM patches). Same tuner lock and DVB guard
+  as analog TV.
 - **Inline comments in the config file work.** `KEY=value   # note` used to keep
   the comment as part of the value, so uncommenting a line of the example config
   broke it (e.g. `SCAN_THRESHOLD` crashed `scan`).

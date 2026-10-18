@@ -19,6 +19,7 @@
 #
 # Channel IDs:   TABLE:CHANNEL          e.g.  us-bcast:7   us-cable:23   us-cable-irc:5
 #                input:NAME             e.g.  input:composite   input:svideo
+#                fm:MHZ                 e.g.  fm:101.1   (FM radio, cards with a radio node)
 #
 # Config precedence (low -> high): built-in defaults < /etc/ntsc-tvh.conf < environment.
 # Config file is simple KEY=VALUE lines.
@@ -86,6 +87,10 @@ DEFAULTS = {
     "INPUTS_ALWAYS_ACTIVE": "1",      # 1 = composite/svideo always appear in lists/m3u
     "DVB_GUARD":     "1",             # 1 = refuse analog use while the DVB side of the same tuner is
                                       #   in use (hybrid cards like the 800e can wedge until replug)
+    # FM radio --------------------------------------------------------------- #
+    "FM_STATIONS":   "",              # FM channels for lists/m3u, comma list of MHz or MHz=Name,
+                                      #   e.g. "88.3,98.7=ESPN,101.1=CBS-FM" ("" = no radio channels)
+    "RADIO_DEVICE":  "",              # V4L2 radio node; "" = the one on the same card as DEVICE
 }
 
 CONF_PATH = "/etc/ntsc-tvh.conf"
@@ -199,17 +204,33 @@ INPUT_CHANNELS = {
 }
 
 
+FM_MIN, FM_MAX = 65.0, 108.0          # the V4L2 radio range (tuner-core): OIRT 65-74 + CCIR 87.5-108
+
+
 class ChannelError(Exception):
     pass
 
 
 def parse_channel(cid):
-    """Return a normalized channel dict from a 'TABLE:CH' or 'input:NAME' id."""
+    """Return a normalized channel dict from a 'TABLE:CH', 'input:NAME' or 'fm:MHZ' id."""
     cid = cid.strip()
     if ":" not in cid:
-        raise ChannelError(f"bad channel id '{cid}' (expected TABLE:CH or input:NAME)")
+        raise ChannelError(f"bad channel id '{cid}' (expected TABLE:CH, input:NAME or fm:MHZ)")
     table, _, rest = cid.partition(":")
     table = table.lower()
+    if table == "fm":
+        try:
+            mhz = float(rest)
+        except ValueError:
+            raise ChannelError(f"FM frequency must be in MHz, e.g. fm:101.1, got '{rest}'")
+        if not FM_MIN <= mhz <= FM_MAX:
+            raise ChannelError(f"FM frequency {mhz:g} MHz is outside {FM_MIN:g}-{FM_MAX:g} MHz")
+        mhz = round(mhz, 4)
+        return {
+            "id": f"fm:{mhz:g}", "kind": "radio", "input": "radio",
+            "label": f"FM {mhz:g}", "group": "Radio",
+            "table": "fm", "ch": None, "freq": mhz,
+        }
     if table == "input":
         name = rest.lower()
         if name not in INPUT_CHANNELS:
@@ -220,7 +241,7 @@ def parse_channel(cid):
             "table": "input", "ch": None, "freq": None,
         }
     if table not in TABLES:
-        raise ChannelError(f"unknown table '{table}' (have: {', '.join(TABLES)})")
+        raise ChannelError(f"unknown table '{table}' (have: {', '.join(TABLES)}, input, fm)")
     try:
         ch = int(rest)
     except ValueError:
@@ -248,6 +269,27 @@ def all_channels(tables):
     return out
 
 
+def fm_stations(cfg):
+    """The FM channels FM_STATIONS lists ("98.7,101.1=CBS-FM"), named where a name is given."""
+    out, seen = [], set()
+    for item in cfg["FM_STATIONS"].split(","):
+        item = item.strip()
+        if not item:
+            continue
+        mhz, _, name = item.partition("=")
+        try:
+            chan = parse_channel(f"fm:{mhz.strip()}")
+        except ChannelError as exc:
+            raise ChannelError(f"FM_STATIONS entry '{item}': {exc}")
+        if chan["id"] in seen:
+            raise ChannelError(f"FM_STATIONS lists {chan['freq']:g} MHz twice")
+        seen.add(chan["id"])
+        if name.strip():
+            chan["label"] = name.strip()
+        out.append(chan)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 #  Device interaction (v4l2-ctl wrappers)
 # --------------------------------------------------------------------------- #
@@ -255,8 +297,8 @@ def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
 
 
-def v4l2(cfg, *args):
-    return run([cfg["V4L2CTL"], "-d", cfg["DEVICE"], *args])
+def v4l2(cfg, *args, device=None):
+    return run([cfg["V4L2CTL"], "-d", device or cfg["DEVICE"], *args])
 
 
 def device_info(cfg):
@@ -324,15 +366,15 @@ def set_standard(cfg):
     return False
 
 
-def set_freq(cfg, mhz):
+def set_freq(cfg, mhz, device=None):
     """Tune to `mhz` and confirm the tuner actually moved there.
     Some tuners accept --set-freq (exit 0) but stay put -- e.g. an xc3028 whose
     firmware failed to load reads back 0 MHz, which would otherwise look exactly
-    like an empty channel."""
-    r = v4l2(cfg, f"--set-freq={mhz:.4f}")
+    like an empty channel. `device` is the radio node for FM, else DEVICE."""
+    r = v4l2(cfg, f"--set-freq={mhz:.4f}", device=device)
     if r.returncode != 0:
         raise ChannelError(f"set-freq failed: {r.stderr.strip() or r.stdout.strip()}")
-    r = v4l2(cfg, "--get-freq")
+    r = v4l2(cfg, "--get-freq", device=device)
     m = re.search(r"\(([\d.]+) MHz\)", r.stdout) if r.returncode == 0 else None
     if m is None:
         return                      # driver can't report it; trust set-freq
@@ -343,8 +385,12 @@ def set_freq(cfg, mhz):
 
 
 def tune(cfg, chan):
-    """Select input, standard, and (for tuner channels) frequency."""
+    """Select input, standard, and (for tuner channels) frequency. FM tunes the radio
+    node, which also switches the card to its radio input."""
     check_dvb_idle(cfg)
+    if chan["kind"] == "radio":
+        set_freq(cfg, chan["freq"], device=need_radio(cfg))
+        return
     idx = resolve_input_index(cfg, chan["input"])
     v4l2(cfg, f"--set-input={idx}")
     set_standard(cfg)
@@ -352,15 +398,51 @@ def tune(cfg, chan):
         set_freq(cfg, chan["freq"])
 
 
-def get_signal(cfg):
+def get_signal(cfg, device=None):
     """Return (signal_pct, afc_hz) or (None, None)."""
-    r = v4l2(cfg, "--get-tuner")
+    r = v4l2(cfg, "--get-tuner", device=device)
     if r.returncode != 0:
         return None, None
     m = re.search(r"Signal strength/AFC\s*:\s*(\d+)%\s*/\s*(-?\d+)", r.stdout)
     if m:
         return int(m.group(1)), int(m.group(2))
     return None, None
+
+
+def get_stereo(cfg, device):
+    """True when the tuner receives a stereo pilot (rxsubchans), False if not, None if it
+    doesn't say. On FM this is the better 'is there a station' sign: the HVR-1950's
+    signal meter reads its IF AGC and stays high between closely spaced stations."""
+    r = v4l2(cfg, "--get-tuner", device=device)
+    m = re.search(r"Available subchannels\s*:\s*(.*)", r.stdout) if r.returncode == 0 else None
+    return None if m is None else "stereo" in m.group(1).split()
+
+
+RADIO_PILOT_WAIT = 1.5            # the stereo flag shows ~0.8 s into a radio capture
+
+
+def get_radio_signal_live(cfg, radio):
+    """(signal %, afc, stereo) on the FM station now tuned. The cx25843 only detects the
+    stereo pilot while its audio path runs, so this reads the radio node for a moment
+    (as a stream would) and takes the readings during that."""
+    try:
+        cat = subprocess.Popen(["cat", radio], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, preexec_fn=_die_with_parent)
+    except OSError:
+        return (*get_signal(cfg, device=radio), get_stereo(cfg, radio))
+    try:
+        stereo = None
+        end = time.monotonic() + RADIO_PILOT_WAIT
+        while cat.poll() is None and time.monotonic() < end:
+            stereo = get_stereo(cfg, radio)
+            if stereo:
+                break
+            time.sleep(0.2)
+        sig, afc = get_signal(cfg, device=radio)
+    finally:
+        cat.kill()
+        cat.wait()
+    return sig, afc, stereo
 
 
 SIGNAL_CAPTURE_SECONDS = 3.0      # the 800e reports its lock ~1.6 s into a capture
@@ -469,15 +551,32 @@ def hw_probe_args(cfg):
     return args
 
 
+def audio_args(cfg):
+    """ffmpeg audio codec options for AUDIO_CODEC (unknown values mean copy)."""
+    return {
+        "copy": ["-c:a", "copy"],
+        "mp2":  ["-c:a", "mp2", "-b:a", "224k"],
+        "ac3":  ["-c:a", "ac3", "-b:a", "224k"],
+    }.get(cfg["AUDIO_CODEC"].lower(), ["-c:a", "copy"])
+
+
+def build_radio_cmd(cfg, radio):
+    """ffmpeg argv for FM: the radio node's MPEG program stream (MP2 audio plus a video
+    track the encoder sends anyway) remuxed to an audio-only MPEG-TS that says it is a
+    radio service, so TVHeadend lists it as radio."""
+    src = "pipe:0" if cfg["CAPTURE_VIA_CAT"] == "1" else radio
+    return [cfg["FFMPEG"], "-hide_banner", "-loglevel", "error",
+            "-fflags", "+genpts", "-f", "mpeg", *hw_probe_args(cfg), "-i", src,
+            "-map", "0:a:0", *audio_args(cfg),
+            "-f", "mpegts", "-mpegts_flags", "+resend_headers",
+            "-mpegts_service_type", "digital_radio", "pipe:1"]
+
+
 def build_ffmpeg_cmd(cfg, info):
     """Return the ffmpeg argv that writes MPEG-TS to stdout."""
     ff = cfg["FFMPEG"]
     acodec = cfg["AUDIO_CODEC"].lower()
-    aargs = {
-        "copy": ["-c:a", "copy"],
-        "mp2":  ["-c:a", "mp2", "-b:a", "224k"],
-        "ac3":  ["-c:a", "ac3", "-b:a", "224k"],
-    }.get(acodec, ["-c:a", "copy"])
+    aargs = audio_args(cfg)
 
     if info["hw_encoder"]:
         # Device already emits an MPEG-2 program stream; just demux + remux to TS.
@@ -568,6 +667,75 @@ def alsa_from_sysfs(cfg):
             devno, cardno = pcms[0]
             return f"hw:{cardno},{devno}"
     return ""
+
+
+DEV_ROOT = "/dev"
+
+
+def _radio_nodes(cfg):
+    """[(sysfs name, devno)] of the radio nodes on the same physical device as DEVICE."""
+    want = _video_hw_device(cfg)
+    if want is None:
+        return []
+    v4l = os.path.join(SYS_ROOT, "class", "video4linux")
+    out = []
+    try:
+        names = sorted(n for n in os.listdir(v4l) if n.startswith("radio"))
+    except OSError:
+        return []
+    for name in names:
+        if _hw_device(os.path.realpath(os.path.join(v4l, name, "device"))) != want:
+            continue
+        try:
+            with open(os.path.join(v4l, name, "dev")) as fh:
+                major, minor = (int(x) for x in fh.read().split(":"))
+        except (OSError, ValueError):
+            continue
+        out.append((name, os.makedev(major, minor)))
+    return out
+
+
+def radio_device(cfg):
+    """The FM radio node of this card: RADIO_DEVICE if set, else the /dev node of the radio
+    on the same card as DEVICE, matched by device number (in a container /dev/radio0 may be
+    the host's radio1). None if the card has none, or it isn't in /dev here."""
+    if cfg["RADIO_DEVICE"]:
+        return cfg["RADIO_DEVICE"]
+    nodes = _radio_nodes(cfg)
+    if not nodes:
+        return None
+    try:
+        names = sorted(os.listdir(DEV_ROOT))
+    except OSError:
+        return None
+    # the sysfs name first (the usual case outside containers), then any other radio node
+    for cand in [nodes[0][0]] + [n for n in names if n.startswith("radio")]:
+        path = os.path.join(DEV_ROOT, cand)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        if stat.S_ISCHR(st.st_mode) and st.st_rdev == nodes[0][1]:
+            return path
+    return None
+
+
+def need_radio(cfg, info=None):
+    """radio_device(), or a ChannelError saying why FM can't work on this card."""
+    if info is not None and not info["hw_encoder"]:
+        raise ChannelError("FM radio needs a card whose radio node streams MPEG audio, like the "
+                           "HVR-1950 (pvrusb2); this card captures raw frames")
+    radio = radio_device(cfg)
+    if radio:
+        return radio
+    nodes = _radio_nodes(cfg)
+    if nodes:
+        raise ChannelError(f"this card has an FM radio node ({nodes[0][0]} in sysfs) but no "
+                           f"/dev node for it here: in a container, map it in too (devices: "
+                           f"- /dev/{nodes[0][0]}:/dev/radio0), or set RADIO_DEVICE")
+    raise ChannelError(f"no FM radio node on the card at {cfg['DEVICE']}: its driver offers "
+                       f"none (the HVR-1950 needs the pvrusb2 FM radio patches); set "
+                       f"RADIO_DEVICE if it is there but not found")
 
 
 PROC_ROOT = "/proc"
@@ -709,8 +877,9 @@ def _stop(procs, grace):
 WATCH_EVERY = 0.5                 # seconds between supervise()'s `watch` checks
 
 
-def supervise(cfg, cmd, lock, via_cat, watch=None):
-    """Run ffmpeg (fed by `cat DEV` when via_cat) as children and return an exit code.
+def supervise(cfg, cmd, lock, via_cat, watch=None, device=None):
+    """Run ffmpeg (fed by `cat DEV` when via_cat; DEV = `device`, else DEVICE) as children
+    and return an exit code.
 
     ntsc-tvh stays the process TVHeadend started, so TVHeadend's stop signal lands here.
     On SIGTERM/SIGINT/SIGHUP the children get SIGTERM, then SIGKILL after STOP_GRACE --
@@ -730,7 +899,7 @@ def supervise(cfg, cmd, lock, via_cat, watch=None):
     try:
         stdin = None
         if via_cat:
-            cat = subprocess.Popen(["cat", cfg["DEVICE"]], stdout=subprocess.PIPE,
+            cat = subprocess.Popen(["cat", device or cfg["DEVICE"]], stdout=subprocess.PIPE,
                                    preexec_fn=_die_with_parent)
             procs.append(cat)
             stdin = cat.stdout
@@ -765,23 +934,25 @@ def cmd_stream(cfg, args):
     chan = parse_channel(args.channel)
     check_dvb_idle(cfg)                            # before device_info() opens the node
     info = device_info(cfg)
+    radio = need_radio(cfg, info) if chan["kind"] == "radio" else None
     wait = float(args.wait if args.wait is not None else cfg["SCAN_LOCK_WAIT"])
     with TunerLock(cfg["LOCK_FILE"], wait=wait) as lock:
         tune(cfg, chan)
-        if cfg["VIDEO_BITRATE"] and info["hw_encoder"]:
+        if cfg["VIDEO_BITRATE"] and info["hw_encoder"] and not radio:
             v4l2(cfg, f"--set-ctrl=video_bitrate={cfg['VIDEO_BITRATE']}")
         time.sleep(0.4)  # let the encoder settle before TVH starts reading
         # cmd already reads "pipe:0" when the cat path is in use (see build_ffmpeg_cmd).
-        cmd = build_ffmpeg_cmd(cfg, info)
+        cmd = build_radio_cmd(cfg, radio) if radio else build_ffmpeg_cmd(cfg, info)
         via_cat = info["hw_encoder"] and cfg["CAPTURE_VIA_CAT"] == "1"
         # Status line for interactive runs only: TVHeadend logs every line a pipe writes
         # to stderr at ERROR level. Real errors (ours and ffmpeg's) still go to stderr.
         if sys.stderr.isatty():
-            sys.stderr.write(f"ntsc-tvh: streaming {chan['id']} "
-                             f"({'tuner '+format(chan['freq'],'.3f')+' MHz' if chan['freq'] else chan['input']}) "
+            where = (f"FM {chan['freq']:.3f} MHz on {radio}" if radio else
+                     f"tuner {chan['freq']:.3f} MHz" if chan["freq"] else chan["input"])
+            sys.stderr.write(f"ntsc-tvh: streaming {chan['id']} ({where}) "
                              f"via {'HW-MPEG' if info['hw_encoder'] else 'raw-encode'}\n")
             sys.stderr.flush()
-        rc = supervise(cfg, cmd, lock, via_cat, watch=lambda: dvb_opened(cfg))
+        rc = supervise(cfg, cmd, lock, via_cat, watch=lambda: dvb_opened(cfg), device=radio)
     sys.exit(rc)
 
 
@@ -796,7 +967,7 @@ def dvb_opened(cfg):
     try:
         check_dvb_idle(cfg)
     except ChannelError as exc:
-        return f"stopped the analog stream: {exc}"
+        return f"stopped the analog stream: {exc}"   # FM included: same tuner
     return None
 
 
@@ -1001,10 +1172,11 @@ def self_path(cfg):
 
 
 def m3u_entries(cfg, state):
-    """Yield (chan_dict) for active tuner channels + (optionally) line inputs."""
+    """Yield (chan_dict) for active tuner channels, FM_STATIONS + (optionally) line inputs."""
     if state:
         for c in state.get("active", []):
             yield c
+    yield from fm_stations(cfg)
     if cfg["INPUTS_ALWAYS_ACTIVE"] == "1":
         for name in INPUT_CHANNELS:
             yield parse_channel(f"input:{name}")
@@ -1045,7 +1217,7 @@ def write_m3u(cfg, state):
 
 def cmd_m3u(cfg, args):
     state = load_state(cfg)
-    if not state and cfg["INPUTS_ALWAYS_ACTIVE"] != "1":
+    if not state and cfg["INPUTS_ALWAYS_ACTIVE"] != "1" and not fm_stations(cfg):
         sys.exit("no scan state found; run `ntsc-tvh scan` first")
     if args.output:
         cfg = dict(cfg); cfg["M3U_FILE"] = args.output
@@ -1070,6 +1242,7 @@ def cmd_list(cfg, args):
     else:
         tables = args.tables.split(",") if args.tables else list(TABLES)
         chans = all_channels([t.strip() for t in tables if t.strip()])
+        chans += fm_stations(cfg)
         if cfg["INPUTS_ALWAYS_ACTIVE"] == "1":
             chans += [parse_channel(f"input:{n}") for n in INPUT_CHANNELS]
     if args.json:
@@ -1092,6 +1265,15 @@ def cmd_signal(cfg, args):
     chan = parse_channel(args.channel)
     with TunerLock(cfg["LOCK_FILE"], wait=float(args.wait or 0)):
         tune(cfg, chan)
+        if chan["kind"] == "radio":
+            time.sleep(float(cfg["SCAN_DWELL"]))
+            sig, afc, stereo = get_radio_signal_live(cfg, need_radio(cfg))
+            if sig is None:
+                print(f"{chan['id']}: tuner reported no signal metric")
+            else:
+                mode = {True: "stereo", False: "mono", None: "mode unknown"}[stereo]
+                print(f"{chan['id']}  {chan['freq']:.3f} MHz  signal={sig}%  {mode}")
+            return
         if chan["kind"] != "tuner":
             print(f"{chan['id']}: selected; line inputs have no RF signal to measure")
             return
@@ -1147,6 +1329,26 @@ def doctor_capture(cfg, info, chk):
     chk("capture test", True, f"{CAPTURE_TEST_FRAMES} frames in {took:.1f} s, showing {seen}{note}")
 
 
+def doctor_radio(cfg, info, chk):
+    """FM: with FM_STATIONS set, the card must have a usable radio node; without, just say
+    whether it has one."""
+    try:
+        stations = fm_stations(cfg)
+    except ChannelError as exc:
+        chk("FM_STATIONS", False, str(exc))
+        return
+    if stations:
+        try:
+            radio = need_radio(cfg, info)
+            chk("FM radio node", True, f"{radio}, {len(stations)} station(s) in FM_STATIONS")
+        except ChannelError as exc:
+            chk("FM radio node", False, str(exc))
+        return
+    radio = radio_device(cfg)
+    if radio and info["hw_encoder"]:
+        print(f"       radio:   {radio} (FM_STATIONS lists stations to add as radio channels)")
+
+
 def cmd_doctor(cfg, args):
     ok = True
     def chk(label, good, detail=""):
@@ -1183,6 +1385,8 @@ def cmd_doctor(cfg, args):
                     chk("ALSA audio device (raw path)", bool(adev), adev or "set RAW_AUDIO_DEV")
             except ChannelError as exc:
                 chk("device probe", False, str(exc))
+            if info:
+                doctor_radio(cfg, info, chk)
             if users:
                 chk("DVB side of this tuner idle", False,
                     f"{held} -- the DVB side is open (see README: 'Power save')")

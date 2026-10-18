@@ -53,6 +53,7 @@ services:
       - 9982:9982
     devices:
       - /dev/video0:/dev/video0                      # analog tuner (V4L2) — the NTSC path
+      # - /dev/radio0:/dev/radio0                    # FM radio (README 9b; HVR-1950 with the FM patches)
 
       # --- ATSC on THIS box too? (optional, read first) --------------------------------
       # The HVR-1950 is a SINGLE tuner. The pvrusb2 driver enforces mutual exclusion
