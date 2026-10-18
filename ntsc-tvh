@@ -1478,6 +1478,7 @@ NET_FIELDS = ("enabled", "networkname", "url", "max_streams", "scan_create", "sk
 EPG_OFF = 0                        # mux "epg": 0 = Disable (1 = Enable (auto), 101 = Auto-Detected)
 SCAN_STATES = {0: "idle", 1: "pending", 2: "pending (idle scan)", 3: "scanning"}
 SCAN_RESULTS = {0: "not scanned", 1: "OK", 2: "FAILED", 3: "OK (partial)", 4: "ignored"}
+PLAYLIST_REREAD = 90               # seconds to wait for TVHeadend to re-read a changed playlist
 
 
 class TvhError(Exception):
@@ -1686,11 +1687,15 @@ def tvh_print_status(api, cfg, st):
     print(f"channels:   {len(names)}" + (": " + ", ".join(names) if names else ""))
     if unmapped:
         print(f"            {len(unmapped)} service(s) not mapped to a channel yet")
-    if pl is not None:
-        have = {m.get("iptv_sname") for m in muxes}
-        missing = [n for n in pl if n not in have]
-        if missing:
-            print(f"            in the playlist but not in TVHeadend yet: {', '.join(missing)}")
+    missing = tvh_missing(st["playlist"], muxes)
+    if missing:
+        print(f"            in the playlist but not in TVHeadend yet: {', '.join(missing)}")
+
+
+def tvh_missing(playlist, muxes):
+    """Playlist channel names TVHeadend has no mux for (yet)."""
+    have = {m.get("iptv_sname") for m in muxes}
+    return [n for n in (playlist or []) if n not in have]
 
 
 def tvh_wait(what, check, timeout, step=2.0):
@@ -1741,6 +1746,20 @@ def tvh_setup(api, cfg, args, st):
             api.write("idnode/save", node=dict(change, uuid=net["uuid"]))
         else:
             print(f"1. network '{net['networkname']}' already set (1 stream, this playlist)")
+        # channels added since TVHeadend last read the playlist (a rescan, new FM_STATIONS):
+        # it re-reads a file:// playlist about once a minute, so wait for that rather than
+        # finishing with them unscanned and unmapped
+        missing = tvh_missing(st["playlist"], st["muxes"])
+        if missing and dry:
+            print(f"   (would wait for TVHeadend to read {len(missing)} new playlist channel(s))")
+        elif missing:
+            print(f"   waiting for TVHeadend to read {len(missing)} new playlist channel(s) "
+                  f"({', '.join(missing)}); it re-reads the playlist about once a minute...")
+            tvh_wait("TVHeadend to re-read the playlist",
+                     lambda: not tvh_missing(st["playlist"], _muxes(api, net["uuid"])),
+                     PLAYLIST_REREAD)
+            st = tvh_read(api, cfg, argparse.Namespace(network_name=net["networkname"],
+                                                        m3u_url=url))
 
     # 2. OTA EPG off on every mux: analog pipes carry no guide data, and the grabber
     #    would subscribe to each mux and run the tuner for nothing.

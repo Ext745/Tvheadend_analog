@@ -838,7 +838,9 @@ FM_STATIONS=88.3,98.7=ESPN,101.1=CBS-FM
 ```
 
 `ntsc-tvh m3u` (or the next `scan`) adds them to the playlist in a "Radio" group,
-and TVHeadend picks them up like the analog channels. Check one first:
+and TVHeadend picks them up like the analog channels: `tvh-setup` scans and maps
+them, and TVHeadend lists them as radio services (DVB service type 2). Check one
+first:
 
 ```bash
 ntsc-tvh signal fm:101.1      # signal % and whether a stereo pilot is there
@@ -1214,6 +1216,10 @@ Changes folded in after a full end-to-end bring-up on `linuxserver/tvheadend`:
   stations to the playlist as audio-only radio services, on cards with a radio
   node (the HVR-1950 with the pvrusb2 FM patches). Same tuner lock and DVB guard
   as analog TV.
+- **`tvh-setup` waits for new playlist channels.** TVHeadend re-reads a `file://`
+  playlist about once a minute; run straight after a rescan (or new FM stations),
+  `tvh-setup` used to report everything done while the new channels were still
+  missing. It now waits for TVHeadend to read them, then scans and maps them.
 - **Inline comments in the config file work.** `KEY=value   # note` used to keep
   the comment as part of the value, so uncommenting a line of the example config
   broke it (e.g. `SCAN_THRESHOLD` crashed `scan`).

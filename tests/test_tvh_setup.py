@@ -183,6 +183,33 @@ class TvhSetupTest(unittest.TestCase):
         self.assertFalse([p for p, _ in self.tvh.writes
                           if p in ("mpegts/network/scan", "service/mapper/save")])
 
+    def add_to_playlist(self, label):
+        with open(self.cfg["M3U_FILE"], "a") as fh:
+            fh.write(f'#EXTINF:-1 tvg-id="fm:101.1",{label}\npipe://z\n')
+
+    def test_waits_for_tvheadend_to_read_new_playlist_channels(self):
+        u = self.tvh.add_net("Analog (ntsc-tvh)", self.url, epg=0)
+        self.add_to_playlist("FM 101.1")
+
+        def reread(secs):       # TVHeadend re-reads the file during the wait
+            if not any(m["iptv_sname"] == "FM 101.1" for m in self.tvh.muxes.values()):
+                m = self.tvh.uuid("mux")
+                self.tvh.muxes[m] = {"uuid": m, "network_uuid": u, "iptv_sname": "FM 101.1",
+                                     "epg": 0, "scan_state": 0, "scan_result": 0, "num_svc": 0}
+        with mock.patch("ntsc_tvh.time.sleep", side_effect=reread):
+            out = self.run_cmd()
+        self.assertIn("waiting for TVHeadend to read 1 new playlist channel(s) (FM 101.1)", out)
+        self.assertIn("3. scan 1 mux(es)", out)
+        self.assertIn("FM 101.1", sorted(c["name"] for c in self.tvh.channels.values()))
+        self.assertNotIn("not in TVHeadend yet", out)
+
+    def test_dry_run_only_says_it_would_wait(self):
+        self.tvh.add_net("Analog (ntsc-tvh)", self.url, epg=0)
+        self.add_to_playlist("FM 101.1")
+        out = self.run_cmd(dry_run=True)
+        self.assertIn("(would wait for TVHeadend to read 1 new playlist channel(s))", out)
+        self.assertEqual(self.tvh.writes, [])
+
     def test_dry_run_sends_no_writes(self):
         self.tvh.add_net("Analog (ntsc-tvh)", self.url, epg=1, scanned=False)
         out = self.run_cmd(dry_run=True)
