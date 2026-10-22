@@ -21,6 +21,70 @@ back to software encoding for them.
 
 ---
 
+## Getting started
+
+The short path from download to watching analog TV in TVHeadend. Each step links
+to the full section.
+
+1. **Check the hardware** ([§2](#2-requirements)): a supported card with its firmware
+   in `/lib/firmware/`, on a USB path where the HVR-1950's encoder firmware loads
+   (`dmesg | grep -i pvrusb2` with no `firmware2 upload transfer failure`; on many
+   USB-3 PCs that takes a hub), and `ffmpeg` + `v4l-utils` installed where TVHeadend
+   runs.
+2. **Get ntsc-tvh**: `git clone https://github.com/Ext745/Tvheadend_analog.git`, or
+   download a release from the
+   [Releases page](https://github.com/Ext745/Tvheadend_analog/releases). It is one
+   Python 3 script (`ntsc-tvh`) with no pip installs.
+3. **Install it** next to TVHeadend: on the host ([§3](#3-install)) or in the
+   linuxserver/tvheadend container ([§3b](#3b-install-in-docker-linuxservertvheadend)).
+   The default device is `/dev/video0`; set `DEVICE=` in `/etc/ntsc-tvh.conf` if your
+   card is another node.
+4. **Check the card**: `ntsc-tvh doctor` should end with `status: all good`. If it
+   doesn't, it says why; see [§11](#11-troubleshooting).
+5. **Find your channels**: `ntsc-tvh scan` walks over-the-air and cable channels and
+   saves the ones with a picture ([§7](#7-scanning)). Try one first with
+   `ntsc-tvh signal us-bcast:4` and `ntsc-tvh stream us-bcast:4 > test.ts`
+   ([§4](#4-quick-start)).
+6. **Put them in TVHeadend**: `ntsc-tvh tvh-setup` creates the network, scans it and
+   maps the channels ([§6](#one-command-setup-ntsc-tvh-tvh-setup)). Add
+   `--user admin --password …` if TVHeadend asks for a login. The channels then show
+   up in TVHeadend's channel list and in its clients.
+
+Optional, once that works:
+
+- **Digital (ATSC)** on the same card: `ntsc-tvh tvh-setup --atsc`. Read
+  [§6c](#6c-atsc-digital-network-in-tvheadend--get-this-right-first) first.
+- **Composite / S-Video** inputs for VCRs and consoles ([§9](#9-game-consoles--retro-computers-composite--s-video)).
+- **FM radio** on the HVR-1950, with kernel patches still under review ([§9b](#9b-fm-radio)).
+- **Stream profiles** for phones, browsers and smaller recordings ([§6b](#6b-stream-profiles-analog-and-digital)).
+- **A daily rescan** to keep the channel list current ([§8](#8-periodic-rescan-24-h-or-none)).
+- **A second card** ([§10](#more-than-one-card)).
+
+## Contents
+
+- [Getting started](#getting-started)
+- [1. How it fits together](#1-how-it-fits-together)
+- [2. Requirements](#2-requirements)
+- [2b. Tested hardware and references](#2b-tested-hardware-and-references)
+- [3. Install](#3-install)
+- [3b. Install in Docker (linuxserver/tvheadend)](#3b-install-in-docker-linuxservertvheadend)
+- [4. Quick start](#4-quick-start)
+- [5. Channel IDs and frequency plans](#5-channel-ids-and-frequency-plans)
+- [6. Wiring it into TVHeadend](#6-wiring-it-into-tvheadend)
+- [6b. Stream profiles (analog and digital)](#6b-stream-profiles-analog-and-digital)
+- [6c. ATSC (digital) network in TVHeadend — get this right first](#6c-atsc-digital-network-in-tvheadend--get-this-right-first)
+- [7. Scanning](#7-scanning)
+- [8. Periodic rescan (24 h or none)](#8-periodic-rescan-24-h-or-none)
+- [9. Game consoles / retro computers (composite & S-Video)](#9-game-consoles--retro-computers-composite--s-video)
+- [9b. FM radio](#9b-fm-radio)
+- [10. Configuration reference](#10-configuration-reference)
+- [11. Troubleshooting](#11-troubleshooting)
+- [12. Design notes & limitations (the honest list)](#12-design-notes--limitations-the-honest-list)
+- [13. Changelog](#13-changelog)
+- [14. Development & tests](#14-development--tests)
+
+---
+
 ## 1. How it fits together
 
 ```
@@ -277,6 +341,9 @@ Test a stream straight to a file before wiring up TVHeadend:
 ntsc-tvh stream us-bcast:7 > test.ts    # Ctrl-C after a few seconds
 ffprobe test.ts                          # expect mpeg2video + mp2/ac3 in an mpegts
 ```
+
+Next: put the channels into TVHeadend with `ntsc-tvh tvh-setup`
+([§6](#one-command-setup-ntsc-tvh-tvh-setup)).
 
 ---
 
