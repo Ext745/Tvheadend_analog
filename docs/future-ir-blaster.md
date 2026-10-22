@@ -39,9 +39,8 @@ rc rc0: lirc_dev: driver ir_kbd_i2c registered at minor = 0, scancode receiver, 
    HVR-1950's IR-out jack, with the emitter stuck over the box's IR window.
 2. **The box's remote codes:** from a public IR code database (LIRC remotes,
    irdb), or captured with a raw-IR receiver. The HVR-1950 cannot capture them.
-3. **A sending tool:** `ir-ctl` (Ubuntu package `ir-keytable`; not installed on the
-   workbench yet). First test: `ir-ctl -d /dev/lirc0 --features`, then send one
-   known code.
+3. **A sending tool:** `ir-ctl` (Ubuntu package `ir-keytable`). First test:
+   `ir-ctl -d /dev/lirc0 --features`, then send one known code.
 4. **Permissions:** `/dev/lirc0` is `root:video` 0660 with no uaccess ACL, unlike the
    video nodes. The user running ntsc-tvh needs the `video` group (or a udev rule),
    and the Docker container needs the device passed through (`--device`).
