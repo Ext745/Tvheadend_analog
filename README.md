@@ -28,9 +28,9 @@ to the full section.
 
 1. **Check the hardware** ([§2](#2-requirements)): a supported card with its firmware
    in `/lib/firmware/`, on a USB path where the HVR-1950's encoder firmware loads
-   (`dmesg | grep -i pvrusb2` with no `firmware2 upload transfer failure`; on many
-   USB-3 PCs that takes a hub), and `ffmpeg` + `v4l-utils` installed where TVHeadend
-   runs.
+   (`dmesg | grep -i pvrusb2` with no `firmware2 upload transfer failure`; if it
+   fails, try another port or a hub, see §2), and `ffmpeg` + `v4l-utils` installed
+   where TVHeadend runs.
 2. **Get ntsc-tvh**: `git clone https://github.com/Ext745/Tvheadend_analog.git`, or
    download a release from the
    [Releases page](https://github.com/Ext745/Tvheadend_analog/releases). It is one
@@ -122,15 +122,17 @@ Network** build them from an M3U this tool generates.
   pvrusb2 *encoder* firmware is uploaded over USB at enumeration ("firmware2"),
   and that large transfer **fails on many xHCI / USB-3 host controllers** —
   `dmesg` shows `pvrusb2: firmware2 upload transfer failure`, and again you get a
-  tuner that tunes but never streams. The fix is a real USB-2/EHCI path: a
-  USB-2 port, a powered USB-2 hub in front of a USB-3 port, or a BIOS xHCI-mode
-  option. **On newer PCs every port is xHCI**, the black "USB 2" ones included
-  (`lspci | grep -i usb` lists only an xHCI controller; `lsusb -t` shows the card
-  straight under an `xhci_hcd` root hub), so there a USB-2 port does *not* help —
-  use the hub. A USB-3 hub works too: it contains a USB-2 hub, and the card runs
-  through that half (`lsusb -t` then shows it under a `480M` hub). Verified on an
-  Intel Tiger Lake (xHCI-only) PC: firmware2 failed on every root port, worked
-  behind a VIA USB-3 hub. **Before anything else, confirm a clean enumeration:**
+  tuner that tunes but never streams. Which paths work is hard to predict, so
+  try them: a real USB-2/EHCI port or a BIOS xHCI-mode option if the PC has
+  one, other root ports, a powered USB-2 hub, or a USB-3 hub (it contains a
+  USB-2 hub; `lsusb -t` then shows the card under a `480M` hub). **On newer PCs
+  every port is xHCI**, the black "USB 2" ones included (`lspci | grep -i usb`
+  lists only an xHCI controller; `lsusb -t` shows the card straight under an
+  `xhci_hcd` root hub). **Don't share the tuner's USB bandwidth** with other
+  high-bandwidth devices (SDR receivers, capture sticks), not even through
+  another hub on the same upstream port: here that caused firmware2 failures
+  and "encoder appears to be stuck" warnings. If every path fails, reboot and
+  try again. **Before anything else, confirm a clean enumeration:**
   `dmesg | grep -i pvrusb2` must show *"Device initialization completed
   successfully"* with **no** `firmware2 upload transfer failure`.
 - **`v4l-utils`** (provides `v4l2-ctl`) and **`ffmpeg`** (with the `mpegts`
@@ -151,7 +153,7 @@ sudo apt install v4l-utils ffmpeg          # Debian/Ubuntu
 
 | | Hauppauge WinTV-HVR-1950 | Pinnacle PCTV HD Pro Stick (800e) |
 |---|---|---|
-| Status | production: Dell 7090 (Intel Tiger Lake, xHCI-only — behind a powered USB hub, see §2); previously a Dell OptiPlex 3020 (native USB 2.0) | dev/test, on the same Dell 7090 |
+| Status | production: Dell 7090 (Intel Tiger Lake, xHCI-only — USB path choice matters, see §2); previously a Dell OptiPlex 3020 (native USB 2.0) | dev/test, on the same Dell 7090 |
 | Driver | `pvrusb2` | `em28xx` (card=17, em2882/3), USB `2304:0227` |
 | Analog path | hardware MPEG-2 encoder (cx23416) → remux, via `cat` | raw YUYV (tvp5150am1 decoder) → software MPEG-2 + ALSA |
 | Tuner / ATSC | single front-end; analog/DVB mutually exclusive | xc3028 tuner shared with an LGDT3303 ATSC demod; **not** exclusive (see §11) |
