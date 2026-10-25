@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Documentation
+
+- **USB path advice corrected** (§2, §11): firmware2 failures came from sharing the
+  tuner's USB bandwidth (an SDR on the same upstream port), not from the hub or
+  the root ports, and they don't always repeat across reboots.
+- **§11: a hung HVR-1950 encoder** (empty streams, firmware2 failing on reload) only
+  recovers after the card loses power for ~20 s; module reloads and USB
+  re-authorization don't help. Stop TVHeadend before replugging a tuner.
+- **§11: silent or muffled TV audio at a stream start** on the HVR-1950: the stock
+  driver sometimes misdetects SAP on a mono channel; a channel change clears it.
+- **`encoder appears to be stuck`**: updated how often it shows up (about one in ten
+  TV starts, most switches between FM radio and TV).
+- **§9b FM radio**: stereo hiss on weak stations, fixed de-emphasis (75 µs with the
+  stereo firmware, 50 µs without), and the status of FM seek.
+
 ## 0.1.0 (2026-10-22)
 
 First public release. The README section numbers (§6, §9b, ...) refer to

@@ -153,7 +153,7 @@ sudo apt install v4l-utils ffmpeg          # Debian/Ubuntu
 
 | | Hauppauge WinTV-HVR-1950 | Pinnacle PCTV HD Pro Stick (800e) |
 |---|---|---|
-| Status | production: Dell 7090 (Intel Tiger Lake, xHCI-only — USB path choice matters, see §2); previously a Dell OptiPlex 3020 (native USB 2.0) | dev/test, on the same Dell 7090 |
+| Status | main test machine: Dell 7090 (Intel Tiger Lake, xHCI-only — USB path choice matters, see §2); previously a Dell OptiPlex 3020 (native USB 2.0) | dev/test, on the same Dell 7090 |
 | Driver | `pvrusb2` | `em28xx` (card=17, em2882/3), USB `2304:0227` |
 | Analog path | hardware MPEG-2 encoder (cx23416) → remux, via `cat` | raw YUYV (tvp5150am1 decoder) → software MPEG-2 + ALSA |
 | Tuner / ATSC | single front-end; analog/DVB mutually exclusive | xc3028 tuner shared with an LGDT3303 ATSC demod; **not** exclusive (see §11) |
@@ -175,7 +175,11 @@ HVR-1950 behaviour seen in testing (kernel 7.0):
   side, 1080i) from `examples/tvh-stream-profiles` plays, software and VAAPI, and
   the "Analog H.264" DVR configs record cleanly.
 - `dmesg` sometimes logs `device's encoder appears to be stuck` at a stream start
-  (§11); harmless when occasional.
+  (§11); harmless when the driver recovers, which it did every time in this project's
+  4-hour soak tests once nothing else shared the card's USB bandwidth.
+- Its audio decoder sometimes misdetects SAP on a mono channel at a stream start,
+  giving silent or muffled audio until the next channel change (§11). Stock driver
+  behaviour, not ntsc-tvh.
 
 800e behaviour seen in testing (kernel 7.0):
 - It powers up in **PAL** 720×576. `tune` switches it to NTSC 720×480.
@@ -909,7 +913,9 @@ redistributable, so it isn't included here or in linux-firmware.
 
 FM isn't scanned. On the HVR-1950 the signal meter reads the IF AGC, which stays
 high between stations in a busy band, so a scan can't tell stations from the gaps
-between them. List the stations you want instead, with an optional name each:
+between them. (A follow-up patch with hardware seek and a real station detector
+has been written and tested on this card; it will be posted once the FM series is
+merged.) List the stations you want instead, with an optional name each:
 
 ```ini
 # /etc/ntsc-tvh.conf
@@ -935,6 +941,14 @@ ntsc-tvh stream fm:101.1 > fm.ts
   `DVB_GUARD` apply to FM exactly as to analog TV.
 - **"stereo" in `signal`** is the more reliable sign that a station is there; it
   needs the FM stereo firmware on the HVR-1950 (otherwise radio is mono).
+- **Weak stations hiss more in stereo** (normal for FM). For one that's too noisy,
+  switch the radio to mono: `v4l2-ctl -d /dev/radio0 --set-tuner=mono`.
+- **De-emphasis is fixed by the firmware**: 75 µs with the FM stereo firmware
+  (right for the Americas and South Korea), 50 µs in mono without it (right for
+  Europe and most other regions). In a 50 µs region the stereo firmware makes the
+  treble a little dull.
+- **Switching between radio and TV** often logs an `encoder appears to be stuck`
+  warning; the driver recovers on its own (§11).
 
 ---
 
@@ -1014,14 +1028,16 @@ fails"), so the trick is isolating the layer — work top-down.
 This has several distinct causes that look identical; check them in order:
 
 1. *`dmesg | grep -i pvrusb2` shows `firmware2 upload transfer failure`* — the
-   MPEG **encoder** firmware didn't upload. Almost always an **xHCI / USB-3**
-   host-controller issue. Move the tuner to a USB-2 port, interpose a powered
-   USB-2 hub, or find a BIOS xHCI-mode option. On an xHCI-only PC the USB-2 ports
-   don't help; only the hub does (see §2). A clean enumeration ends in
-   *"Device initialization completed successfully"* with no firmware2 error.
-   This is deterministic (fails every boot), not flaky — if it reproduces across
-   power-cycles, suspect the controller, not a loose cable. (Test the device on
-   a second machine with native USB-2 to confirm it's the host and not the card.)
+   MPEG **encoder** firmware didn't upload. Usually the USB path: an **xHCI /
+   USB-3** host controller, or another high-bandwidth device (an SDR receiver, a
+   capture stick) sharing the same upstream port, even through a separate hub.
+   Try the paths listed in §2: other root ports, a powered USB-2 hub, a USB-3 hub,
+   a BIOS xHCI-mode option. It isn't always repeatable: in testing the same port
+   failed for a whole evening and worked again after a reboot, so reboot before
+   writing a port off. A clean enumeration ends in *"Device initialization
+   completed successfully"* with no firmware2 error. If it fails on every path
+   after a reboot, test the card on a second machine to tell the host from the
+   card.
 2. *`dmesg` is clean but the stream is still empty* — prove the encoder raw:
    `v4l2-ctl -d /dev/video0 --set-input=0 --set-freq=67.25 && timeout 4 cat /dev/video0 | wc -c`.
    Megabytes = encoder fine, problem is downstream (ffmpeg/tool); near-zero with
@@ -1032,11 +1048,23 @@ This has several distinct causes that look identical; check them in order:
    default). On some ffmpeg builds `-f mpeg -i /dev/video0` yields no stream while
    `cat /dev/video0 | ffmpeg -f mpeg -i pipe:0` is reliable.
 
-**`dmesg`: `pvrusb2: ***WARNING*** device's encoder appears to be stuck`.** Seen on
-roughly one in three HVR-1950 stream starts in testing, followed by `Giving up on
-command ... normally recovered via a firmware reload`. The driver reloads the
-encoder firmware and the stream starts ~0.8 s later than usual; nothing else is
-affected. Only worry if it repeats on every start or the stream then stays empty.
+**`dmesg`: `pvrusb2: ***WARNING*** device's encoder appears to be stuck`.** Followed
+by `Giving up on command ... normally recovered via a firmware reload`. The driver
+reloads the encoder firmware and the stream starts ~0.8 s later than usual; nothing
+else is affected. How often depends on what ran before: in testing about one in ten
+TV starts after TV, but most starts right after switching between FM radio and TV
+(either way), and more often while another device shared the tuner's USB bandwidth.
+Only worry if the stream then stays empty (next entry).
+
+**The encoder stays dead: every stream is empty after a `stuck` warning, and
+`dmesg` shows `firmware2 upload transfer failure` on the reload.** The encoder chip
+is hung and only losing power revives it. In testing, reloading the `pvrusb2`
+module and re-authorizing the USB device did *not* help. Unplug the card's USB
+cable (the HVR-1950 is bus-powered) for about 20 seconds, then plug it back in; a
+2-second unplug wasn't enough. If the card is on a hub with per-port power
+switching, `uhubctl` can do the same remotely. Stop TVHeadend (or its container)
+first, so nothing holds the device while it disappears: re-enumerating a wedged
+800e while TVHeadend still held it froze the whole host in testing.
 
 **`Operation not permitted` opening `/dev/video0`.** Not a sandbox issue and not
 "device busy" — it's the pvrusb2 **analog/digital mutual exclusion**. TVHeadend
@@ -1047,7 +1075,7 @@ the OTA EPG grabber** in TVHeadend when you want analog. One tuner can't expose
 both modes at once.
 
 **em28xx cards (Pinnacle 800e): analog + ATSC at once wedges the tuner until
-replug.** Unlike pvrusb2, em28xx does *not* refuse the second user. Two ways it
+replug.** Unlike pvrusb2, em28xx does *not* refuse the second user. Three ways it
 went wrong in testing:
 - Composite streaming while TVHeadend ran an OTA EPG grab on an ATSC mux.
 - An RF analog retune while an **idle** TVHeadend merely held `frontend0` open:
@@ -1055,10 +1083,12 @@ went wrong in testing:
 - A composite capture while an idle TVHeadend held `frontend0` open (adapter
   power save off) -- no retune at all.
 
-Either way the stick's I2C bus wedged. `dmesg` filled with `lgdt330x ...
+Each time the stick's I2C bus wedged. `dmesg` filled with `lgdt330x ...
 i2c_read_demod_bytes ... error (ret == -6)`, TVHeadend logged `FE_READ_STATUS
 error No such device or address`, and every analog tune failed with `tuner did
-not tune ... 0.000 MHz`. Only unplugging the stick cleared it.
+not tune ... 0.000 MHz`. Only unplugging the stick cleared it. Stop TVHeadend
+before you unplug it: re-enumerating the wedged stick while TVHeadend still held
+it froze the host in testing.
 
 `ntsc-tvh` now refuses instead (`DVB_GUARD=1`, the default): `the digital (DVB)
 side of this tuner is in use: tvheadend (pid N) has the DVB frontend open ...`.
@@ -1124,6 +1154,15 @@ USB/PCI device as the video node (via `/sys`), falling back to an `arecord -l` c
 named like the tuner or driver. If neither matches, it uses **no** audio and `doctor`
 flags it, so it never captures the host's own sound chip. Set `RAW_AUDIO_DEV=hw:N,D`
 to choose explicitly (e.g. a card cabled into the PC's line-in).
+
+**HVR-1950: a TV channel starts with silent or muffled audio.** Now and then the
+card's audio decoder (cx25843) wrongly detects SAP or stereo on a mono channel when
+a stream starts; `v4l2-ctl -d /dev/video0 --get-tuner` then lists SAP (or stereo)
+for a channel that has neither. In testing it hit 2–15% of starts on a weak mono
+signal (an RF modulator), with the stock kernel too, so it's a driver issue and not
+ntsc-tvh. Changing to another channel and back clears it. With the FM stereo firmware
+installed (§9b) it happened more often and sometimes survived the channel change;
+there's no reliable fix for that case yet.
 
 **Auto-network keeps recreating muxes / losing channel maps.** Something is
 changing the pipe:// URLs between playlist reads — the URL is the mux's identity.
