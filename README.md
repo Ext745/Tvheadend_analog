@@ -939,6 +939,9 @@ ntsc-tvh stream fm:101.1 > fm.ts
   per `AUDIO_CODEC`), in an MPEG-TS marked as a radio service.
 - **One tuner**: FM, analog TV, composite and ATSC share it, so the tuner lock and
   `DVB_GUARD` apply to FM exactly as to analog TV.
+- **Another card without FM** (a second card under `--card`, like the 800e) leaves
+  `FM_STATIONS` out of its list and playlist, so the stations can stay in
+  `/etc/ntsc-tvh.conf` or the container environment.
 - **"stereo" in `signal`** is the more reliable sign that a station is there; it
   needs the FM stereo firmware on the HVR-1950 (otherwise radio is mono).
 - **Weak stations hiss more in stereo** (normal for FM). For one that's too noisy,

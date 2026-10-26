@@ -720,6 +720,25 @@ def radio_device(cfg):
     return None
 
 
+def no_radio_on_card(cfg):
+    """True if sysfs shows no FM radio node on the card at DEVICE (a raw-frame card, or an
+    HVR-1950 without the FM patches); False if it has one or sysfs can't tell."""
+    return (not cfg["RADIO_DEVICE"] and _video_hw_device(cfg) is not None
+            and not _radio_nodes(cfg))
+
+
+def card_fm_stations(cfg):
+    """fm_stations() for this card's lists and playlist: none on a card with no FM radio, so
+    FM_STATIONS from /etc/ntsc-tvh.conf or the environment doesn't give a second card
+    channels it can't play."""
+    stations = fm_stations(cfg)
+    if stations and no_radio_on_card(cfg):
+        print(f"note: FM_STATIONS left out: the card at {cfg['DEVICE']} has no FM radio node",
+              file=sys.stderr)
+        return []
+    return stations
+
+
 def need_radio(cfg, info=None):
     """radio_device(), or a ChannelError saying why FM can't work on this card."""
     if info is not None and not info["hw_encoder"]:
@@ -1176,7 +1195,7 @@ def m3u_entries(cfg, state):
     if state:
         for c in state.get("active", []):
             yield c
-    yield from fm_stations(cfg)
+    yield from card_fm_stations(cfg)
     if cfg["INPUTS_ALWAYS_ACTIVE"] == "1":
         for name in INPUT_CHANNELS:
             yield parse_channel(f"input:{name}")
@@ -1217,7 +1236,7 @@ def write_m3u(cfg, state):
 
 def cmd_m3u(cfg, args):
     state = load_state(cfg)
-    if not state and cfg["INPUTS_ALWAYS_ACTIVE"] != "1" and not fm_stations(cfg):
+    if not state and cfg["INPUTS_ALWAYS_ACTIVE"] != "1" and not card_fm_stations(cfg):
         sys.exit("no scan state found; run `ntsc-tvh scan` first")
     if args.output:
         cfg = dict(cfg); cfg["M3U_FILE"] = args.output
@@ -1242,7 +1261,7 @@ def cmd_list(cfg, args):
     else:
         tables = args.tables.split(",") if args.tables else list(TABLES)
         chans = all_channels([t.strip() for t in tables if t.strip()])
-        chans += fm_stations(cfg)
+        chans += card_fm_stations(cfg)
         if cfg["INPUTS_ALWAYS_ACTIVE"] == "1":
             chans += [parse_channel(f"input:{n}") for n in INPUT_CHANNELS]
     if args.json:
@@ -1336,6 +1355,10 @@ def doctor_radio(cfg, info, chk):
         stations = fm_stations(cfg)
     except ChannelError as exc:
         chk("FM_STATIONS", False, str(exc))
+        return
+    if stations and not info["hw_encoder"] and no_radio_on_card(cfg):
+        # a raw card next to an FM card that FM_STATIONS is meant for; lists leave them out
+        print("       FM:      none on this card; its lists and playlist leave FM_STATIONS out")
         return
     if stations:
         try:

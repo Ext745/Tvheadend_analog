@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Fixes
+
+- **FM channels on a second card without FM**: `FM_STATIONS` set in
+  `/etc/ntsc-tvh.conf` or the environment also reached `--card` cards, so a raw
+  card like the 800e got radio channels it can't play in its playlist, and its
+  `doctor` failed. A card whose driver has no radio node now leaves them out (§9b).
+
 ### Documentation
 
 - **USB path advice corrected** (§2, §11): firmware2 failures came from sharing the

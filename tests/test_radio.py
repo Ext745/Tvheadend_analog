@@ -29,6 +29,15 @@ def devno(path):
 
 class FmChannels(unittest.TestCase):
 
+    def setUp(self):
+        # an empty /sys: whether the card has a radio node is unknown, so FM_STATIONS is kept
+        # (the host's own cards must not decide; see RadioDevice for the sysfs cases)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        p = mock.patch.object(ntsc, "SYS_ROOT", tmp.name)
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_parse(self):
         c = ntsc.parse_channel("fm:101.10")
         self.assertEqual((c["id"], c["kind"], c["freq"], c["label"], c["group"]),
@@ -156,6 +165,25 @@ class RadioDevice(unittest.TestCase):
     def test_radio_device_setting_wins(self):
         cfg = dict(self.cfg, RADIO_DEVICE="/dev/radio7")
         self.assertEqual(ntsc.radio_device(cfg), "/dev/radio7")
+
+    def test_card_without_radio_leaves_fm_stations_out(self):
+        # FM_STATIONS shared with an FM card (environment, /etc/ntsc-tvh.conf): a second card
+        # with no radio node, like the 800e, doesn't list channels it can't play
+        cfg = dict(self.cfg, FM_STATIONS="98.7,101.1")
+        self.node("radio0", f"{USB}/1-9/1-9:1.0", "/dev/zero")     # the other card's radio
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertEqual(ntsc.card_fm_stations(cfg), [])
+            ids = [c["id"] for c in ntsc.m3u_entries(cfg, None)]
+        self.assertEqual(ids, ["input:composite", "input:svideo"])
+        self.assertIn("FM_STATIONS left out", err.getvalue())
+
+    def test_card_with_radio_keeps_fm_stations(self):
+        self.node("radio0", self.parent, "/dev/zero")
+        cfg = dict(self.cfg, FM_STATIONS="98.7")
+        self.assertEqual([c["id"] for c in ntsc.card_fm_stations(cfg)], ["fm:98.7"])
+        self.node("radio1", f"{USB}/1-9/1-9:1.0", "/dev/zero", dev_name=False)
+        self.assertFalse(ntsc.no_radio_on_card(dict(self.cfg, DEVICE="/dev/nope")))  # unknown
 
     def test_raw_card_refused(self):
         self.node("radio0", self.parent, "/dev/zero")
@@ -298,6 +326,12 @@ class DoctorRadio(unittest.TestCase):
     def test_stations_without_node_fail(self):
         (res,), _ = self.check(None, FM_STATIONS="98.7")
         self.assertEqual(res[:2], ("FM radio node", False))
+
+    def test_raw_card_without_radio_is_not_a_failure(self):
+        with mock.patch.object(ntsc, "no_radio_on_card", return_value=True):
+            res, out = self.check(None, RAW, FM_STATIONS="98.7")
+        self.assertEqual(res, [])
+        self.assertIn("leave FM_STATIONS out", out)
 
     def test_bad_stations_fail(self):
         (res,), _ = self.check("/dev/radio0", FM_STATIONS="98.7,abc")
