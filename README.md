@@ -830,6 +830,13 @@ Analog "is this channel live?" is inherently fuzzy. Four strategies:
   0.01, live; its empty channels are black, so empty. `scan` prints `var`, `noise` and `motion` for every channel,
   so the thresholds can be tuned, and `examples/analog-check` (§14) repeats this
   check for one channel.
+
+  **Recheck:** a channel that passes is grabbed a second time and counts only if
+  that grab passes too. Snow's `noise` wanders: later 800e scans saw single grabs
+  of 0.57–0.60 on empty channels, which slipped under the limit once each, while
+  the next grab of the same channel scored 0.75. A real picture passes every
+  grab. The recheck adds about 3 s per live channel; a channel it rejects shows
+  `recheck=failed` with the second grab's numbers.
 - **`both`** — require signal AND a picture. Fewest false positives, slowest.
 
 Recommendation: keep `auto`. Use `signal` only for the fastest walk on a card whose

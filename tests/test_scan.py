@@ -241,6 +241,32 @@ class IsActive(unittest.TestCase):
         self.assertFalse(self.check("both", 80, self.SNOW)[0])
         self.assertFalse(self.check("both", 10, self.PIC)[0])
 
+    def grabs(self, method, sig, *metrics):
+        """is_active() with picture_metrics answering `metrics` in turn; -> (result, grabs)."""
+        with mock.patch.object(ntsc, "get_signal", return_value=(sig, 5)), \
+             mock.patch.object(ntsc, "capture_gray", return_value=b"") as cap, \
+             mock.patch.object(ntsc, "picture_metrics", side_effect=list(metrics)):
+            result = ntsc.is_active(make_cfg(), HW, None, method, 35)
+        return result, cap.call_count
+
+    def test_a_picture_is_grabbed_twice(self):
+        self.assertEqual(self.grabs("video", 0, self.PIC, self.PIC)[0][0], True)
+        self.assertEqual(self.grabs("auto", 0, self.PIC, self.PIC)[1], 2)
+        self.assertEqual(self.grabs("both", 80, self.PIC, self.PIC)[1], 2)
+
+    def test_snow_that_passes_one_grab_fails_the_recheck(self):
+        # us-bcast:20 on the 800e: noise 0.57 on the scan's grab, 0.75 on the next one
+        lucky = {"var": 51.8, "noise": 0.57, "motion": 1.75}
+        (active, metrics), grabs = self.grabs("video", 0, lucky, self.SNOW)
+        self.assertFalse(active)
+        self.assertEqual(grabs, 2)
+        self.assertEqual(metrics, {"signal": 0, "afc": 5, "var": 42.5, "noise": 0.83,
+                                   "motion": 1.64, "recheck": "failed"})
+
+    def test_no_recheck_when_the_first_grab_fails(self):
+        self.assertEqual(self.grabs("video", 0, self.SNOW)[1], 1)
+        self.assertEqual(self.grabs("both", 10, self.PIC)[1], 1)    # signal too weak anyway
+
 
 class CmdScan(unittest.TestCase):
 
@@ -317,13 +343,14 @@ class CmdScan(unittest.TestCase):
                                 for f in (67.25, 175.25, 211.25)}
         found, grabs = self.auto_scan(reports_signal=True)
         self.assertEqual(found, ["us-bcast:4", "us-bcast:7", "us-bcast:13"])
-        # ch 2 and 3 are grabbed (the card hasn't shown signal yet), then only signal > 0.
-        self.assertEqual(grabs, [55.25, 61.25, 67.25, 175.25, 211.25])
+        # ch 2 and 3 are grabbed (the card hasn't shown signal yet), then only signal > 0;
+        # each picture is grabbed twice (the recheck).
+        self.assertEqual(grabs, [55.25, 61.25, 67.25, 67.25, 175.25, 175.25, 211.25, 211.25])
 
     def test_auto_judges_every_channel_on_a_card_that_never_reports_signal(self):
         found, grabs = self.auto_scan(reports_signal=False)
         self.assertEqual(found, ["us-bcast:4", "us-bcast:7", "us-bcast:13"])
-        self.assertEqual(len(grabs), 68)
+        self.assertEqual(len(grabs), 68 + 3)          # + the rechecks of the 3 pictures
 
     def test_auto_is_the_default(self):
         self.assertEqual(ntsc.DEFAULTS["SCAN_METHOD"], "auto")

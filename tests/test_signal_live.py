@@ -120,7 +120,7 @@ class AutoOnARawCard(unittest.TestCase):
                                                   threshold=None, dwell=0, wait=0,
                                                   no_m3u=True))
             state = ntsc.load_state(cfg)
-        self.assertEqual(len(grabs), 68)
+        self.assertEqual(len(grabs), 68 + 3)          # + the rechecks of the 3 pictures
         self.assertEqual([c["id"] for c in state["active"]],
                          ["us-bcast:4", "us-bcast:7", "us-bcast:13"])
         self.assertEqual(state["active"][0]["signal"], 44)     # the live reading is kept

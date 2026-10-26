@@ -8,6 +8,9 @@
   `/etc/ntsc-tvh.conf` or the environment also reached `--card` cards, so a raw
   card like the 800e got radio channels it can't play in its playlist, and its
   `doctor` failed. A card whose driver has no radio node now leaves them out (§9b).
+- **`scan`: snow counted as a channel now and then** (800e). Snow's noise score
+  wanders and one grab in a scan could dip under `SCAN_NOISE_MAX`. A channel that
+  looks like a picture is now grabbed again and must pass both times (§7).
 
 ### Documentation
 
