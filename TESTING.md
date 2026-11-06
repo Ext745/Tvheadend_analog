@@ -30,6 +30,17 @@ Result key: ✅ pass (clean) · ⚠️ degraded (completed, with errors / resets
 | Not recorded | A | `7f4996f` | us-bcast scan with a test pattern on ch4 | `auto` 2 min 12 s, `video` 5 min 50 s, `signal` 2 min; same single channel |
 | 2026-10-26 | B | `e471d46` | Regression check: `doctor`, `analog-check`, composite and S-Video, all `analog-*` profiles | Passed; two fixes came out of it |
 
+## Indirect evidence: pvrusb2 FM driver soaks
+*Backfilled, unverified.* These come from the FM patch series' testing (README §9b), run on the same HVR-1950. They exercised the card, its encoder and its USB path, including analog TV and composite. They did **not** run `ntsc-tvh` or TVHeadend: a script drove the card directly, with TVHeadend stopped. So they aren't counted in the cumulative runtime above.
+
+| Date | Duration | Configuration | Recorded result |
+|---|---|---|---|
+| 2026-10-14 to 10-17 | 72 h, hourly cycles | v1 patches, with the stereo firmware file | 72/72 cycles, no failed step |
+| Ended 2026-10-20 | 72 h, hourly cycles | v1 patches, without it | 72/72 cycles, no failed step |
+| 2026-10 | 4 h, 15 min cycles | v2 patches, with the firmware file | 16/16 cycles, no failed step |
+
+Each cycle ran ATSC, FM, analog TV and composite. The ATSC lock was never lost, and the card never re-enumerated. The `encoder appears to be stuck` warning came about 3 times per cycle and recovered every time.
+
 ## Issues found by real-hardware testing
 Problems that only showed up on hardware or over long runs. *Backfilled, unverified.*
 
