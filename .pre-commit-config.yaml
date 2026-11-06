@@ -1,0 +1,25 @@
+# Runs on every commit, private repos included: history goes public with the repo.
+# Install: make setup   (needs the gitleaks binary on PATH)   Update pins: pre-commit autoupdate
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: detect-private-key
+      - id: check-added-large-files
+        args: [--maxkb=5000]
+      - id: check-merge-conflict
+      - id: check-yaml
+
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: Secrets (gitleaks, staged changes)
+        entry: gitleaks git --pre-commit --redact --staged --no-banner
+        language: system
+        pass_filenames: false
+      - id: scrub-check
+        name: Personal data (IMEI/ICCID/phone/keys/MAC/public IP)
+        entry: python3 tools/scrub.py --check
+        language: system
+        types: [text]
+        exclude: '(^tools/scrub\.py$|lock\.json$|\.lock$)'

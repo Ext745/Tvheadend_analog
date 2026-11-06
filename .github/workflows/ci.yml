@@ -1,0 +1,37 @@
+name: CI
+on:
+  push:
+    branches: [main, master]   # PR commits are covered by pull_request, so they don't run twice
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GITLEAKS_VERSION: 8.30.1
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # full history, so gitleaks scans every commit
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Secrets in full history (gitleaks)
+        run: |
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar xz gitleaks
+          ./gitleaks git --log-opts="--all" --redact --no-banner .
+
+      - name: Personal data scan
+        run: make scrub-check
+
+      - name: Build
+        run: make build
+
+      - name: Tests
+        run: make test

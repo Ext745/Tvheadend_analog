@@ -1,5 +1,7 @@
 # ntsc-tvh — Analog NTSC in TVHeadend via pipe:// muxes
 
+**Maturity:** `experimental` · **Tested on:** Hauppauge WinTV-HVR-1950, Pinnacle 800e · **Soak time:** 0 h logged. See [TESTING.md](TESTING.md) and [STATUS.md](STATUS.md)
+
 A modern replacement for the old [ivtv-utils pipe-mux script](https://tvheadend.org/d/3480-script-for-analog-v4l2-device-support-in-tvh-via-pipe-mux).
 It uses **`v4l2-ctl`** for tuning (no `ivtv-tune`), carries its own NTSC/CATV
 frequency tables so you select channels by name, can **scan** the band and save
@@ -1329,6 +1331,10 @@ most of the code, the tests and this documentation, and ran and evaluated the
 hardware tests on the cards listed in §2b. I reviewed the changes, tested them on
 real hardware and am responsible for the result. Commits it helped with carry a
 `Co-Authored-By: Claude` line.
+
+- [Development approach](https://github.com/Ext745/.github/blob/main/APPROACH.md)
+- [AI usage policy](https://github.com/Ext745/.github/blob/main/AI_POLICY.md)
+- [Contributing](https://github.com/Ext745/.github/blob/main/CONTRIBUTING.md) · [Security](https://github.com/Ext745/.github/blob/main/SECURITY.md) · [Support](https://github.com/Ext745/.github/blob/main/SUPPORT.md)
 
 ### Running the tests
 

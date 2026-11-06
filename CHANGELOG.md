@@ -14,6 +14,7 @@
 
 ### Documentation
 
+- **Project state files**: `STATUS.md`, `TESTING.md`, `GOAL.md`, `AGENTS.md` and `docs/decisions/` record what's verified and why.
 - **USB path advice corrected** (§2, §11): firmware2 failures came from sharing the
   tuner's USB bandwidth (an SDR on the same upstream port), not from the hub or
   the root ports, and they don't always repeat across reboots.
