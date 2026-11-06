@@ -3,7 +3,7 @@
 **Updated:** 2026-11-06 · **Maturity:** `experimental` · **Visibility:** public
 
 ## Summary
-v0.1.0 is released, and the tool streams and scans on both tested cards. Hardware results so far come from short sessions and 4-hour soaks that predate the soak logger, so no soak time is logged yet. The same HVR-1950 also passed 148 h of driver-level soaks in the FM patch work, which didn't run this tool (see `TESTING.md`).
+v0.1.0 is released, and the tool streams and scans on both tested cards. Hardware results so far come from short sessions and 4-hour soaks that predate the soak logger, so no soak time is logged yet. The same HVR-1950 also passed 148 h of analog and FM soaks in the FM patch work, driving the card directly rather than through this tool (see `TESTING.md`).
 
 ## Verified on real hardware
 All *backfilled, unverified*, from README §2b and `CHANGELOG.md`. See `TESTING.md`. Maturity stays `experimental` until the owner sets it.

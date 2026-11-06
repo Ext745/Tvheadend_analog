@@ -3,7 +3,7 @@
 *Inferred from `README.md` and the commit history. The README stays the user guide; if the two disagree, raise it.*
 
 ## What I want to achieve
-Watch and record analog NTSC sources in TVHeadend: over-the-air, analog cable, composite and S-Video. `ntsc-tvh` tunes with `v4l2-ctl`, selects channels by name, scans for live channels, and streams through `pipe://` muxes.
+Get analog TV and FM radio working on Linux with these tuners: over-the-air, analog cable, composite, S-Video and FM. TVHeadend is the vehicle for delivering them, not the point of the project. `ntsc-tvh` tunes with `v4l2-ctl`, selects channels by name, scans for live channels, and streams through `pipe://` muxes.
 
 ## Background
 It replaces the old ivtv-utils pipe-mux script, which depended on `ivtv-tune`. It was designed against the Hauppauge WinTV-HVR-1950, whose hardware MPEG-2 encoder means no software video encoding.
@@ -24,9 +24,11 @@ From README §12:
 | # | Criterion | How it's verified | Done |
 |---|---|---|---|
 | 1 | Unit tests pass with no tuner, on Python 3.10 to 3.14 | `test.yml` in CI | ☑ |
-| 2 | Streams and scans on the HVR-1950 and 800e through TVHeadend | Hardware runs, README §2b | ☑ *backfilled, unverified* |
-| 3 | A newcomer gets working channels by following README "Getting started" | Walkthrough, pending, to be run by the owner | ☐ |
-| 4 | Runs without encoder or tuner faults over logged soak runs | `make soak`, logged in `TESTING.md` | ☐ |
+| 2 | Analog TV and composite work on the HVR-1950 and 800e | Hardware runs, README §2b | ☑ *backfilled, unverified* |
+| 3 | FM radio works on the HVR-1950, with the pvrusb2 FM patches | Hardware runs, README §9b and `TESTING.md` | ☑ *backfilled, unverified* |
+| 4 | Both reach a viewer through TVHeadend | Hardware runs, README §2b | ☑ *backfilled, unverified* |
+| 5 | A newcomer gets working channels by following README "Getting started" | Walkthrough, pending, to be run by the owner | ☐ |
+| 6 | Runs without encoder or tuner faults over logged soak runs | `make soak`, logged in `TESTING.md` | ☐ |
 
 ## References
 - [Original script discussion](https://tvheadend.org/d/3480-script-for-analog-v4l2-device-support-in-tvh-via-pipe-mux)

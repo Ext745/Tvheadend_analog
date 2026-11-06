@@ -31,7 +31,7 @@ Result key: ✅ pass (clean) · ⚠️ degraded (completed, with errors / resets
 | 2026-10-26 | B | `e471d46` | Regression check: `doctor`, `analog-check`, composite and S-Video, all `analog-*` profiles | Passed; two fixes came out of it |
 
 ## Indirect evidence: pvrusb2 FM driver soaks
-*Backfilled, unverified.* These come from the FM patch series' testing (README §9b), run on the same HVR-1950. They exercised the card, its encoder and its USB path, including analog TV and composite. They did **not** run `ntsc-tvh` or TVHeadend: a script drove the card directly, with TVHeadend stopped. So they aren't counted in the cumulative runtime above.
+*Backfilled, unverified.* These come from the FM patch series' testing (README §9b), run on the same HVR-1950. They exercised what this project is about: analog TV, composite and FM on the card, plus its encoder and USB path. They ran below this tool: a script drove the card directly, without `ntsc-tvh` or TVHeadend. So they aren't counted in the cumulative runtime above.
 
 | Date | Duration | Configuration | Recorded result |
 |---|---|---|---|
