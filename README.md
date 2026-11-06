@@ -908,7 +908,7 @@ audio-only streams marked as radio services. Today that means the **HVR-1950 wit
 pvrusb2 FM radio patches**, which aren't in the kernel yet: with a stock kernel the
 card has no `/dev/radio0`, and `doctor` says so. The patches are under review on the
 linux-media list
-([v2](https://lore.kernel.org/r/20261022232548.526232-1-stealth3m@yahoo.com));
+([v2](https://lore.kernel.org/r/20261022232548.526232-1-stealth3m@yahoo.com)); <!-- scrub:allow mailing-list message ID -->
 until they are merged you have to build the cx25840, tda8290 and pvrusb2 modules
 from them yourself.
 

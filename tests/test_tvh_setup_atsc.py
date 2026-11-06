@@ -138,7 +138,7 @@ class FakeAtsc:
 
 
 def args(**kw):
-    a = dict(url="http://tvh:9981", user=None, password=None, network_name=None,
+    a = dict(url="http://tvh:9981", user=None, password=None, network_name=None,  # scrub:allow default argument
              m3u_url=None, status=False, teardown=False, dry_run=False, atsc=True,
              tuner=None, mux_list=None, rescan=False)
     a.update(kw)
