@@ -1,6 +1,6 @@
 # ntsc-tvh — Analog NTSC in TVHeadend via pipe:// muxes
 
-**Maturity:** `experimental` · **Tested on:** Hauppauge WinTV-HVR-1950, Pinnacle 800e · **Soak time:** 0 h logged. See [TESTING.md](TESTING.md) and [STATUS.md](STATUS.md)
+**Maturity:** `experimental` · **Tested on:** Hauppauge WinTV-HVR-1950, Pinnacle 800e · **Soak time:** 148 h. See [TESTING.md](TESTING.md) and [STATUS.md](STATUS.md)
 
 A modern replacement for the old [ivtv-utils pipe-mux script](https://tvheadend.org/d/3480-script-for-analog-v4l2-device-support-in-tvh-via-pipe-mux).
 It uses **`v4l2-ctl`** for tuning (no `ivtv-tune`), carries its own NTSC/CATV

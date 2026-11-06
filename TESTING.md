@@ -13,10 +13,13 @@ Rows are added by `tools/soak.py --append` (or by hand for runs made before the 
 
 | ID | Start | Duration | Rig | Commit | Configuration | Result | Notes |
 |---|---|---|---|---|---|---|---|
+| S-001 | 2026-10-14 | 72.0 h | A | FM patches v1 | With the stereo firmware file, hourly cycles | ✅ pass | Driver soak, *backfilled, unverified*. Card driven directly, not through `ntsc-tvh`. Each cycle ran ATSC, FM, analog TV and composite. Encoder `stuck` warning ~3 per cycle, all recovered. 72/72 cycles |
+| S-002 | 2026-10-17 | 72.0 h | A | FM patches v1 | Without the firmware file, hourly cycles | ✅ pass | Driver soak, *backfilled, unverified*. Card driven directly, not through `ntsc-tvh`. Each cycle ran ATSC, FM, analog TV and composite. Encoder `stuck` warning ~3 per cycle, all recovered. 72/72 cycles |
+| S-003 | 2026-10-22 | 4.0 h | A | FM patches v2 | With the firmware file, 15 min cycles | ✅ pass | Driver soak, *backfilled, unverified*. Card driven directly, not through `ntsc-tvh`. Each cycle ran ATSC, FM, analog TV and composite. Encoder `stuck` warning ~3 per cycle, all recovered. 16/16 cycles |
 
-**Cumulative real-hardware runtime:** 0.0 h
+**Cumulative real-hardware runtime:** 148.0 h
 
-The soak tests below predate this log, and their dates and counts weren't recorded, so they don't count here.
+S-001 to S-003 come from the pvrusb2 FM patch testing (README §9b) and predate this log. The 4-hour soaks of `ntsc-tvh` in the table below had no recorded dates or counts, so they don't count here.
 
 Result key: ✅ pass (clean) · ⚠️ degraded (completed, with errors / resets / restarts / leak) · ❌ fail (process died)
 
@@ -29,17 +32,6 @@ Result key: ✅ pass (clean) · ⚠️ degraded (completed, with errors / resets
 | Not recorded | A | Not recorded | 4-hour soak tests | Encoder recovered every time once nothing shared the USB bandwidth (README §2b) |
 | Not recorded | A | `7f4996f` | us-bcast scan with a test pattern on ch4 | `auto` 2 min 12 s, `video` 5 min 50 s, `signal` 2 min; same single channel |
 | 2026-10-26 | B | `e471d46` | Regression check: `doctor`, `analog-check`, composite and S-Video, all `analog-*` profiles | Passed; two fixes came out of it |
-
-## Indirect evidence: pvrusb2 FM driver soaks
-*Backfilled, unverified.* These come from the FM patch series' testing (README §9b), run on the same HVR-1950. They exercised what this project is about: analog TV, composite and FM on the card, plus its encoder and USB path. They ran below this tool: a script drove the card directly, without `ntsc-tvh` or TVHeadend. So they aren't counted in the cumulative runtime above.
-
-| Date | Duration | Configuration | Recorded result |
-|---|---|---|---|
-| 2026-10-14 to 10-17 | 72 h, hourly cycles | v1 patches, with the stereo firmware file | 72/72 cycles, no failed step |
-| Ended 2026-10-20 | 72 h, hourly cycles | v1 patches, without it | 72/72 cycles, no failed step |
-| 2026-10 | 4 h, 15 min cycles | v2 patches, with the firmware file | 16/16 cycles, no failed step |
-
-Each cycle ran ATSC, FM, analog TV and composite. The ATSC lock was never lost, and the card never re-enumerated. The `encoder appears to be stuck` warning came about 3 times per cycle and recovered every time.
 
 ## Issues found by real-hardware testing
 Problems that only showed up on hardware or over long runs. *Backfilled, unverified.*

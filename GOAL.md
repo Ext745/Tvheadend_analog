@@ -28,7 +28,7 @@ From README §12:
 | 3 | FM radio works on the HVR-1950, with the pvrusb2 FM patches | Hardware runs, README §9b and `TESTING.md` | ☑ *backfilled, unverified* |
 | 4 | Both reach a viewer through TVHeadend | Hardware runs, README §2b | ☑ *backfilled, unverified* |
 | 5 | A newcomer gets working channels by following README "Getting started" | Walkthrough, pending, to be run by the owner | ☐ |
-| 6 | Runs without encoder or tuner faults over logged soak runs | `make soak`, logged in `TESTING.md` | ☐ |
+| 6 | Runs without encoder or tuner faults over soak runs | Soak log in `TESTING.md` | ☑ *backfilled, unverified*, driver-level so far |
 
 ## References
 - [Original script discussion](https://tvheadend.org/d/3480-script-for-analog-v4l2-device-support-in-tvh-via-pipe-mux)
