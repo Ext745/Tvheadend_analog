@@ -245,7 +245,7 @@ def check_stream(ntsc_path, chan, seconds, rep, out, card=None):
 
 # ---------------------------------------------------------------- TVHeadend ------------- #
 class Tvh:
-    def __init__(self, url, user=None, password=None):
+    def __init__(self, url, user=None, password=None):  # scrub:allow default argument
         self.url = url.rstrip("/")
         handlers = []
         if user:                        # TVHeadend asks for digest or basic, per its config

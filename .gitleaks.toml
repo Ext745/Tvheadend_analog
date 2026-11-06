@@ -1,0 +1,7 @@
+# gitleaks config: default rules plus one narrow exception.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Fake keys used as self-test fixtures in the scrubber"
+paths = ['''^tools/scrub\.py$''']

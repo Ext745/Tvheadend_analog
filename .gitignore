@@ -6,3 +6,18 @@ venv/
 *.ts
 *.log
 .DS_Store
+
+# --- repo kit: secrets, never commit ---
+.env
+.env.*
+*.pem
+*.key
+*.p12
+id_rsa*
+id_ed25519*
+wg*.conf
+secrets/
+.prepublish-deny
+
+# --- repo kit: soak evidence ---
+tests/soak/logs/**/output.log

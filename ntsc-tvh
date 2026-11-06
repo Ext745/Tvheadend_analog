@@ -1538,7 +1538,7 @@ class TvhApi:
     Reads are always sent. Writes are printed and skipped with dry_run, so a dry run
     shows every call that would change something (method, URL, body)."""
 
-    def __init__(self, url, user=None, password=None, dry_run=False):
+    def __init__(self, url, user=None, password=None, dry_run=False):  # scrub:allow default argument
         import urllib.request
         self.url = url.rstrip("/")
         self.dry_run = dry_run

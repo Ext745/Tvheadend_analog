@@ -313,7 +313,7 @@ def bench(v, dev, clip):
 
 
 class Tvh:
-    def __init__(self, url, user=None, password=None, dry_run=False):
+    def __init__(self, url, user=None, password=None, dry_run=False):  # scrub:allow default argument
         self.url = url.rstrip("/") + "/"
         self.dry_run = dry_run
         handlers = []
