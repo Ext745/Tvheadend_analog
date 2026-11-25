@@ -14,16 +14,24 @@ Usage:
   scrub.py --check FILE...         list findings, exit 1 if any (pre-commit/CI)
   git log -p | scrub.py --check -  check text from stdin
   scrub.py --git-history [REPO]    check every added line in all commits; reports commit/file/kind
+                                   and a fingerprint; .prepublish-allow lists reviewed ones
   cmd | scrub.py -                 filter stdin
   scrub.py --self-test
 
 Lines containing the marker  scrub:allow  are left untouched.
+History can't take that marker after the fact, so a false positive already
+committed is listed instead in .prepublish-allow as '<kind> <fingerprint>'
+(the fingerprint --git-history prints). Only a line with exactly that text
+is allowed; any other finding still fails.
 """
 import argparse
+import hashlib
 import ipaddress
+import os
 import re
 import subprocess
 import sys
+import tempfile
 
 ALLOW_MARKER = "scrub:allow"
 
@@ -191,7 +199,9 @@ _PEM_START = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 
 def scan_git_history(repo=".", excludes=DEFAULT_HISTORY_EXCLUDES):
     """Scan lines added in every commit on every ref. Works on bare/mirror repos.
-    Returns a list of dicts: {commit, file, kind}, one per unique (commit, file, kind)."""
+    Returns a list of dicts: {commit, file, kind, fp}, one per unique (commit, file, kind, fp).
+    fp fingerprints the flagged line (sha256 of its stripped text, 16 hex digits), so a
+    reviewed false positive can be listed in .prepublish-allow without quoting it."""
     cmd = ["git", "-C", repo, "log", "-p", "--all", "--full-history", "--no-color", "--no-ext-diff",
            "--format=COMMIT %H", "--", "."] + [f":!{e}" for e in excludes]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -207,25 +217,48 @@ def scan_git_history(repo=".", excludes=DEFAULT_HISTORY_EXCLUDES):
             text = line[1:]
             found = ["pem-private-key"] if _PEM_START.search(text) else []
             _scrub_line(text, found)
+            fp = hashlib.sha256(text.strip().encode()).hexdigest()[:16] if found else ""
             for kind in found:
-                key = (commit, path, kind)
+                key = (commit, path, kind, fp)
                 if key not in seen:
                     seen.add(key)
-                    findings.append({"commit": commit, "file": path, "kind": kind})
+                    findings.append({"commit": commit, "file": path, "kind": kind, "fp": fp})
     proc.wait()
     if proc.returncode not in (0, None):
         raise RuntimeError(f"git log failed in {repo} (exit {proc.returncode})")
     return findings
 
 
+ALLOW_FILE = ".prepublish-allow"
+
+
+def load_allow(repo="."):
+    """Reviewed false positives: lines of '<kind> <fp>', '#' starts a comment."""
+    allow = set()
+    try:
+        with open(os.path.join(repo, ALLOW_FILE)) as fh:
+            for line in fh:
+                parts = line.split("#", 1)[0].split()
+                if len(parts) == 2:
+                    allow.add((parts[0], parts[1]))
+    except FileNotFoundError:
+        pass
+    return allow
+
+
 def check_git_history(repo="."):
+    allow = load_allow(repo)
     findings = scan_git_history(repo)
-    for f in findings:
-        print(f"{f['commit']}  {f['file']}: {f['kind']}")
-    if findings:
-        print(f"\n{len(findings)} finding(s) in history. Find with: git log --all -p -- <file>",
+    shown = [f for f in findings if (f["kind"], f["fp"]) not in allow]
+    for f in shown:
+        print(f"{f['commit']}  {f['file']}: {f['kind']} {f['fp']}")
+    if len(shown) < len(findings):
+        print(f"{len(findings) - len(shown)} reviewed finding(s) allowed by {ALLOW_FILE}",
               file=sys.stderr)
-    return 1 if findings else 0
+    if shown:
+        print(f"\n{len(shown)} finding(s) in history. Find with: git log --all -p -- <file>",
+              file=sys.stderr)
+    return 1 if shown else 0
 
 
 def self_test():
@@ -291,8 +324,47 @@ def self_test():
     if "<PRIVATE-KEY>" not in scrub_text(pem):
         ok = False
         print("FAIL pem")
+    ok = _self_test_allowlist() and ok
     print("self-test:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
+
+
+def _self_test_allowlist():
+    """--git-history: a listed fingerprint passes; an unlisted finding still fails."""
+    def git(repo, *args):
+        subprocess.run(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                        "-c", "commit.gpgsign=false", *args], check=True, capture_output=True)
+
+    with tempfile.TemporaryDirectory() as repo:
+        git(repo, "init", "-q")
+        with open(os.path.join(repo, "log.txt"), "w") as fh:
+            fh.write("wlan0 ether a4:5e:60:c2:11:9f\n")
+        git(repo, "add", "log.txt")
+        git(repo, "commit", "-q", "-m", "one")
+        found = scan_git_history(repo)
+        if [f["kind"] for f in found] != ["mac"]:
+            print(f"FAIL allowlist: expected one mac finding, got {found}")
+            return False
+        with open(os.path.join(repo, ALLOW_FILE), "w") as fh:
+            fh.write(f"# reviewed\nmac {found[0]['fp']}  # test sample\n")
+        if load_allow(repo) != {("mac", found[0]["fp"])}:
+            print("FAIL allowlist: file not parsed")
+            return False
+        with open(os.devnull, "w") as null:
+            out, err = sys.stdout, sys.stderr
+            sys.stdout = sys.stderr = null
+            try:
+                allowed = check_git_history(repo)
+                with open(os.path.join(repo, "log.txt"), "a") as fh:
+                    fh.write("eth0 ether a4:5e:60:c2:11:a0\n")
+                git(repo, "commit", "-q", "-am", "two")
+                still_fails = check_git_history(repo)
+            finally:
+                sys.stdout, sys.stderr = out, err
+        if allowed != 0 or still_fails != 1:
+            print(f"FAIL allowlist: allowed={allowed} (want 0), unlisted={still_fails} (want 1)")
+            return False
+    return True
 
 
 def main():

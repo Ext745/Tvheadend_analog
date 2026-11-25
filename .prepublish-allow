@@ -1,0 +1,13 @@
+# Reviewed false positives in git history: '<kind> <fingerprint>' per line.
+# A fingerprint is the sha256 (16 hex) of the flagged line's stripped text,
+# printed by: python3 tools/scrub.py --git-history .
+# Reviewed 2026-11-25. Add a line only after reading it.
+
+# Login parameters defaulting to None in function signatures: no value (tests/, ntsc-tvh, examples/)
+credential 8ecdc925666cdd53
+credential 169ae8fb0661a146
+credential 7f5dea00a92c1ba0
+
+# The owner's address inside a lore.kernel.org message ID (README patch link);
+# public on the mailing list, and marked scrub:allow in the current README.
+email 23bf5f5a5d2e9f56
