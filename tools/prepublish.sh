@@ -28,10 +28,11 @@ if ((${#files[@]})) && ! python3 tools/scrub.py --check "${files[@]}"; then bad 
 
 step "Personal data anywhere in history"
 hist=$(python3 tools/scrub.py --git-history . 2>/dev/null)
+allowed=$(python3 tools/scrub.py --git-history . 2>&1 >/dev/null | sed -n 's/^\([0-9]*\) reviewed finding.*/\1/p')
 if [[ -z "$hist" ]]; then
-  good "clean"
+  if [[ -n "$allowed" ]]; then good "clean ($allowed reviewed false positives allowed by .prepublish-allow)"; else good "clean"; fi
 else
-  bad "findings in history (commit  file: kind):"; echo "$hist" | sed 's/^/       /'
+  bad "findings in history (commit  file: kind fingerprint):"; echo "$hist" | sed 's/^/       /'
 fi
 
 step "Forbidden strings (.prepublish-deny)"
